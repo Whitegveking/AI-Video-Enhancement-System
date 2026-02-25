@@ -1,0 +1,10 @@
+# AI Video Enhancement System - 依赖清单
+# PyTorch (CUDA 12.4) - 需单独安装:
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+
+opencv-python>=4.8.0
+numpy>=1.24.0
+PyQt5>=5.15.0
+basicsr>=1.4.2
+realesrgan>=0.3.0
+gfpgan>=1.3.8
