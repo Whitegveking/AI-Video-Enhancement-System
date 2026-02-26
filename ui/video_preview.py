@@ -26,7 +26,9 @@ def numpy_to_qpixmap(rgb_array: np.ndarray, max_width: int = 0, max_height: int 
     """
     h, w, ch = rgb_array.shape
     bytes_per_line = ch * w
-    q_image = QImage(rgb_array.data, w, h, bytes_per_line, QImage.Format_RGB888)
+    # 确保数组内存连续，并转为 bytes（PyQt5 不接受 memoryview）
+    rgb_array = np.ascontiguousarray(rgb_array)
+    q_image = QImage(rgb_array.tobytes(), w, h, bytes_per_line, QImage.Format_RGB888)
     pixmap = QPixmap.fromImage(q_image)
 
     if max_width > 0 or max_height > 0:

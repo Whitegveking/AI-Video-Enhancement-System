@@ -32,6 +32,7 @@ def get_video_info(video_path: str) -> Dict[str, Any]:
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=True,
+            encoding='utf-8', errors='replace',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
         probe_data = json.loads(result.stdout)
@@ -112,11 +113,12 @@ def extract_audio(video_path: str, output_path: Optional[str] = None) -> Optiona
 
     try:
         subprocess.run(
-            cmd, capture_output=True, check=True,
+            cmd, capture_output=True, text=True, check=True,
+            encoding='utf-8', errors='replace',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"音频提取失败: {e.stderr.decode()}")
+        raise RuntimeError(f"音频提取失败: {e.stderr}")
 
     return output_path
 
@@ -150,11 +152,12 @@ def merge_audio_video(
 
     try:
         subprocess.run(
-            cmd, capture_output=True, check=True,
+            cmd, capture_output=True, text=True, check=True,
+            encoding='utf-8', errors='replace',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"音视频合并失败: {e.stderr.decode()}")
+        raise RuntimeError(f"音视频合并失败: {e.stderr}")
 
     return output_path
 
@@ -195,11 +198,12 @@ def encode_video_from_frames(
 
     try:
         subprocess.run(
-            cmd, capture_output=True, check=True,
+            cmd, capture_output=True, text=True, check=True,
+            encoding='utf-8', errors='replace',
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         )
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"视频编码失败: {e.stderr.decode()}")
+        raise RuntimeError(f"视频编码失败: {e.stderr}")
 
     return output_path
 

@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QFileDialog, QMessageBox, QAction, QMenuBar, QStatusBar
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QDragEnterEvent, QDropEvent
 
 # 将项目根目录加入路径
@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import SUPPORTED_VIDEO_FORMATS, MODELS, WEIGHTS_DIR
 from ui.video_preview import VideoPreviewWidget
 from ui.parameter_panel import ParameterPanel
+from ui.video_compare_dialog import VideoCompareDialog
 from utils.ffmpeg_utils import get_video_info
 from utils.video_io import get_video_properties, read_single_frame
 from utils.color_utils import bgr_to_rgb
@@ -37,6 +38,16 @@ class MainWindow(QMainWindow):
         self._enhancer = None
         self._worker_thread = None
         self._preview_thread = None
+        self._realtime_preview_on = False
+        self._cached_model_key = None  # 记录已加载的模型key，避免重复加载
+        self._output_path = ""  # 最近一次处理的输出文件路径
+
+        # 防抖定时器：滑块拖动时延迟200ms再触发预览
+        self._preview_debounce_timer = QTimer(self)
+        self._preview_debounce_timer.setSingleShot(True)
+        self._preview_debounce_timer.setInterval(200)
+        self._preview_debounce_timer.timeout.connect(self._on_debounced_preview)
+        self._pending_preview_frame = 0
 
         self._init_window()
         self._init_menu()
@@ -112,6 +123,8 @@ class MainWindow(QMainWindow):
         self.param_panel.start_processing.connect(self._on_start_processing)
         self.param_panel.cancel_processing.connect(self._on_cancel_processing)
         self.param_panel.preview_requested.connect(self._on_preview_frame)
+        self.param_panel.preview_toggled.connect(self._on_realtime_preview_toggled)
+        self.param_panel.compare_requested.connect(self._on_compare_videos)
 
         # 帧滑块
         self.preview_widget.frame_slider_changed.connect(self._on_frame_slider_changed)
@@ -191,11 +204,69 @@ class MainWindow(QMainWindow):
             rgb_frame = bgr_to_rgb(frame)
             self.preview_widget.update_original(rgb_frame)
 
+        # 实时预览模式：用防抖定时器延迟触发增强预览
+        if self._realtime_preview_on:
+            self._pending_preview_frame = frame_index
+            self._preview_debounce_timer.start()  # 重新计时
+
+    def _on_realtime_preview_toggled(self, checked: bool):
+        """实时预览开关状态变化"""
+        self._realtime_preview_on = checked
+        if checked:
+            if not self._input_path:
+                QMessageBox.information(self, "提示", "请先导入视频")
+                self.param_panel.btn_realtime_preview.setChecked(False)
+                return
+            # 开启时加载模型
+            if not self._load_enhancer():
+                self.param_panel.btn_realtime_preview.setChecked(False)
+                return
+            self.statusBar().showMessage("实时预览已开启 - 拖动帧滑块查看增强效果")
+            self.param_panel.append_log("🟢 实时预览已开启")
+            # 立即预览当前帧
+            self._pending_preview_frame = self.preview_widget.frame_slider.value()
+            self._on_debounced_preview()
+        else:
+            self._preview_debounce_timer.stop()
+            self.statusBar().showMessage("实时预览已关闭")
+            self.param_panel.append_log("🔴 实时预览已关闭")
+
+    def _on_debounced_preview(self):
+        """防抖后触发的实时预览（滑块停止拖动300ms后执行）"""
+        if not self._realtime_preview_on or not self._input_path:
+            return
+        if not self._enhancer or not self._enhancer.is_loaded:
+            return
+        # 如果上一个预览线程还在跑，跳过（等下次触发）
+        if self._preview_thread and self._preview_thread.isRunning():
+            return
+
+        params = self.param_panel.get_parameters()
+        frame_index = self._pending_preview_frame
+
+        self._preview_thread = PreviewWorkerThread(self)
+        self._preview_thread.setup(
+            enhancer=self._enhancer,
+            input_path=self._input_path,
+            frame_index=frame_index,
+            use_tiling=params["use_tiling"],
+            tile_size=params["tile_size"],
+            tile_pad=params["tile_pad"],
+        )
+        self._preview_thread.result_signal.connect(self._on_preview_result)
+        self._preview_thread.error_signal.connect(self._on_preview_error)
+        self._preview_thread.start()
+
     def _load_enhancer(self) -> bool:
-        """加载 AI 模型"""
+        """加载 AI 模型（已加载相同模型时跳过，避免重复加载）"""
         params = self.param_panel.get_parameters()
         model_key = params["model_key"]
         model_config = MODELS[model_key]
+
+        # 如果已经加载了相同的模型，直接返回
+        if (self._enhancer and self._enhancer.is_loaded
+                and self._cached_model_key == model_key):
+            return True
 
         # 检查权重文件
         weight_path = os.path.join(WEIGHTS_DIR, model_config["weight_file"])
@@ -227,6 +298,7 @@ class MainWindow(QMainWindow):
                     half=params["half"],
                 )
 
+            self._cached_model_key = model_key
             self.param_panel.append_log(f"✓ 模型加载完成")
             return True
 
@@ -327,15 +399,20 @@ class MainWindow(QMainWindow):
 
     def _on_processing_finished(self, output_path: str):
         """处理完成"""
+        self._output_path = output_path
         self.param_panel.set_processing_state(False)
         self.param_panel.progress_bar.setValue(100)
         self.param_panel.lbl_status.setText("处理完成！")
         self.param_panel.append_log(f"✓ 处理完成: {output_path}")
         self.statusBar().showMessage(f"输出: {output_path}")
 
+        # 启用对比播放按钮
+        self.param_panel.btn_compare.setEnabled(True)
+
         QMessageBox.information(
             self, "处理完成",
-            f"视频增强完成！\n\n输出路径:\n{output_path}"
+            f"视频增强完成！\n\n输出路径:\n{output_path}\n\n"
+            f"点击「🎬 对比播放」可同步对比原始与增强视频"
         )
 
     def _on_processing_error(self, error_msg: str):
@@ -349,6 +426,20 @@ class MainWindow(QMainWindow):
         """处理状态更新"""
         self.statusBar().showMessage(message)
         self.param_panel.append_log(message)
+
+    def _on_compare_videos(self):
+        """打开视频对比播放窗口"""
+        if not self._input_path or not self._output_path:
+            QMessageBox.information(self, "提示", "请先处理视频后再进行对比播放")
+            return
+        if not os.path.exists(self._output_path):
+            QMessageBox.warning(self, "文件不存在",
+                                f"增强视频文件不存在:\n{self._output_path}")
+            return
+
+        self.param_panel.append_log("🎬 打开视频对比播放...")
+        dlg = VideoCompareDialog(self._input_path, self._output_path, parent=self)
+        dlg.exec_()
 
     def _show_about(self):
         """显示关于对话框"""

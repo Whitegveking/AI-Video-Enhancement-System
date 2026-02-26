@@ -21,6 +21,8 @@ class ParameterPanel(QWidget):
     start_processing = pyqtSignal()
     cancel_processing = pyqtSignal()
     preview_requested = pyqtSignal()
+    preview_toggled = pyqtSignal(bool)  # 实时预览开关状态变化
+    compare_requested = pyqtSignal()    # 视频对比播放
     import_video = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -145,11 +147,37 @@ class ParameterPanel(QWidget):
         layout.addWidget(adv_group)
 
         # ========== 操作按钮 ==========
+        # 实时预览开关
+        preview_row = QHBoxLayout()
         self.btn_preview = QPushButton("👁 预览当前帧")
         self.btn_preview.setMinimumHeight(36)
         self.btn_preview.setStyleSheet(self._btn_secondary_style())
         self.btn_preview.clicked.connect(self.preview_requested.emit)
-        layout.addWidget(self.btn_preview)
+        preview_row.addWidget(self.btn_preview)
+
+        self.btn_realtime_preview = QPushButton("🔴 实时预览")
+        self.btn_realtime_preview.setMinimumHeight(36)
+        self.btn_realtime_preview.setCheckable(True)
+        self.btn_realtime_preview.setChecked(False)
+        self.btn_realtime_preview.setStyleSheet("""
+            QPushButton {
+                background-color: #3c3c3c;
+                color: #eee;
+                border: 1px solid #555;
+                border-radius: 6px;
+                font-size: 13px;
+            }
+            QPushButton:hover { background-color: #4a4a4a; border-color: #0078d4; }
+            QPushButton:checked {
+                background-color: #0078d4;
+                color: white;
+                border-color: #0078d4;
+            }
+            QPushButton:disabled { background-color: #2a2a2a; color: #666; }
+        """)
+        self.btn_realtime_preview.toggled.connect(self._on_realtime_toggled)
+        preview_row.addWidget(self.btn_realtime_preview)
+        layout.addLayout(preview_row)
 
         self.btn_start = QPushButton("🚀 开始处理")
         self.btn_start.setMinimumHeight(44)
@@ -185,6 +213,15 @@ class ParameterPanel(QWidget):
         """)
         self.btn_cancel.clicked.connect(self.cancel_processing.emit)
         layout.addWidget(self.btn_cancel)
+
+        # 视频对比播放
+        self.btn_compare = QPushButton("🎬 对比播放")
+        self.btn_compare.setMinimumHeight(36)
+        self.btn_compare.setEnabled(False)
+        self.btn_compare.setStyleSheet(self._btn_secondary_style())
+        self.btn_compare.setToolTip("处理完成后，同步播放原始与增强视频进行对比")
+        self.btn_compare.clicked.connect(self.compare_requested.emit)
+        layout.addWidget(self.btn_compare)
 
         # ========== 进度条 ==========
         self.progress_bar = QProgressBar()
@@ -265,7 +302,11 @@ class ParameterPanel(QWidget):
         self.btn_cancel.setEnabled(processing)
         self.btn_import.setEnabled(not processing)
         self.btn_preview.setEnabled(not processing)
+        self.btn_realtime_preview.setEnabled(not processing)
         self.combo_model.setEnabled(not processing)
+        # 处理中关闭实时预览
+        if processing and self.btn_realtime_preview.isChecked():
+            self.btn_realtime_preview.setChecked(False)
 
     def update_progress(self, current: int, total: int, fps: float):
         """更新进度条"""
@@ -276,6 +317,18 @@ class ParameterPanel(QWidget):
             self.lbl_status.setText(
                 f"处理中: {current}/{total} 帧 | {fps:.2f} fps | 预计剩余: {remaining:.0f}s"
             )
+
+    def is_realtime_preview_on(self) -> bool:
+        """实时预览是否开启"""
+        return self.btn_realtime_preview.isChecked()
+
+    def _on_realtime_toggled(self, checked: bool):
+        """实时预览开关切换"""
+        if checked:
+            self.btn_realtime_preview.setText("🟢 实时预览")
+        else:
+            self.btn_realtime_preview.setText("🔴 实时预览")
+        self.preview_toggled.emit(checked)
 
     def append_log(self, message: str):
         """追加日志"""

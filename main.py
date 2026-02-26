@@ -8,6 +8,12 @@ import os
 # 添加项目根目录到 Python 路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# 修复 Qt 平台插件路径（虚拟环境下可能找不到）
+import PyQt5
+_qt_plugins = os.path.join(os.path.dirname(PyQt5.__file__), "Qt5", "plugins")
+if os.path.exists(_qt_plugins):
+    os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = _qt_plugins
+
 from PyQt5.QtWidgets import QApplication
 from PyQt5.QtCore import Qt
 from ui.main_window import MainWindow
