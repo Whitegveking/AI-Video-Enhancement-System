@@ -19,33 +19,50 @@ FFMPEG_BIN = "ffmpeg"  # 系统 PATH 中的 ffmpeg
 
 # ===================== 模型配置 =====================
 MODELS = {
+    "Auto": {
+        "name": "Auto",
+        "icon": "✨",
+        "display_name": "智能自动选择",
+        "scale": 4,
+        "weight_file": "",
+        "weight_url": "",
+        "description": "根据视频内容自动选择最佳模型",
+    },
     "RealESRGAN_x4": {
         "name": "RealESRGAN_x4plus",
+        "icon": "🌄",
+        "display_name": "通用超分 (4x)",
         "scale": 4,
         "weight_file": "RealESRGAN_x4plus.pth",
         "weight_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.1.0/RealESRGAN_x4plus.pth",
-        "description": "通用场景4倍超分辨率",
+        "description": "风景/建筑/自然场景等通用画质增强",
     },
     "RealESRGAN_x2": {
         "name": "RealESRGAN_x2plus",
+        "icon": "🖼️",
+        "display_name": "轻度超分 (2x)",
         "scale": 2,
         "weight_file": "RealESRGAN_x2plus.pth",
         "weight_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.1/RealESRGAN_x2plus.pth",
-        "description": "通用场景2倍超分辨率",
+        "description": "轻度放大，保留更多原始细节",
     },
     "RealESRGAN_x4_Anime": {
         "name": "RealESRGAN_x4plus_anime_6B",
+        "icon": "🎬",
+        "display_name": "动漫超分 (4x)",
         "scale": 4,
         "weight_file": "RealESRGAN_x4plus_anime_6B.pth",
         "weight_url": "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth",
-        "description": "动漫场景4倍超分辨率",
+        "description": "专为动漫/卡通风格优化",
     },
     "GFPGAN_v1.4": {
         "name": "GFPGANv1.4",
+        "icon": "👤",
+        "display_name": "人像修复",
         "scale": 2,
         "weight_file": "GFPGANv1.4.pth",
         "weight_url": "https://github.com/TencentARC/GFPGAN/releases/download/v1.3.0/GFPGANv1.4.pth",
-        "description": "人脸修复与增强",
+        "description": "人脸修复与美化，还原五官细节",
     },
 }
 

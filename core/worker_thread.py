@@ -38,6 +38,8 @@ class VideoWorkerThread(QThread):
         self._use_tiling = True
         self._tile_size = DEFAULT_TILE_SIZE
         self._tile_pad = DEFAULT_TILE_PAD
+        self._denoise_strength = 0.0
+        self._outscale = 0
 
     def setup(
         self,
@@ -47,6 +49,8 @@ class VideoWorkerThread(QThread):
         use_tiling: bool = True,
         tile_size: int = DEFAULT_TILE_SIZE,
         tile_pad: int = DEFAULT_TILE_PAD,
+        denoise_strength: float = 0.0,
+        outscale: int = 0,
     ):
         """
         配置工作线程参数（在 start() 之前调用）
@@ -58,6 +62,8 @@ class VideoWorkerThread(QThread):
             use_tiling: 是否使用分块
             tile_size: 分块大小
             tile_pad: 分块填充
+            denoise_strength: 降噪强度 (0.0~1.0)
+            outscale: 输出放大倍率 (0=使用模型原生)
         """
         self._enhancer = enhancer
         self._input_path = input_path
@@ -65,6 +71,8 @@ class VideoWorkerThread(QThread):
         self._use_tiling = use_tiling
         self._tile_size = tile_size
         self._tile_pad = tile_pad
+        self._denoise_strength = denoise_strength
+        self._outscale = outscale
 
     def run(self):
         """线程主体 —— 执行视频处理"""
@@ -81,6 +89,8 @@ class VideoWorkerThread(QThread):
                 use_tiling=self._use_tiling,
                 tile_size=self._tile_size,
                 tile_pad=self._tile_pad,
+                denoise_strength=self._denoise_strength,
+                outscale=self._outscale,
                 progress_callback=self._on_progress,
                 preview_callback=self._on_preview,
             )
@@ -126,6 +136,8 @@ class PreviewWorkerThread(QThread):
         self._use_tiling = True
         self._tile_size = DEFAULT_TILE_SIZE
         self._tile_pad = DEFAULT_TILE_PAD
+        self._denoise_strength = 0.0
+        self._outscale = 0
 
     def setup(
         self,
@@ -135,6 +147,8 @@ class PreviewWorkerThread(QThread):
         use_tiling: bool = True,
         tile_size: int = DEFAULT_TILE_SIZE,
         tile_pad: int = DEFAULT_TILE_PAD,
+        denoise_strength: float = 0.0,
+        outscale: int = 0,
     ):
         self._enhancer = enhancer
         self._input_path = input_path
@@ -142,6 +156,8 @@ class PreviewWorkerThread(QThread):
         self._use_tiling = use_tiling
         self._tile_size = tile_size
         self._tile_pad = tile_pad
+        self._denoise_strength = denoise_strength
+        self._outscale = outscale
 
     def run(self):
         try:
@@ -152,6 +168,8 @@ class PreviewWorkerThread(QThread):
                 self._use_tiling,
                 self._tile_size,
                 self._tile_pad,
+                self._denoise_strength,
+                self._outscale,
             )
             self.result_signal.emit(original, enhanced)
         except Exception as e:

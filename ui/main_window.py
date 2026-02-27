@@ -41,6 +41,8 @@ class MainWindow(QMainWindow):
         self._realtime_preview_on = False
         self._cached_model_key = None  # 记录已加载的模型key，避免重复加载
         self._output_path = ""  # 最近一次处理的输出文件路径
+        self._auto_resolved_key = None  # 自动模式检测缓存，每个视频只检测一次
+        self._auto_resolved_for = ""  # 记录上次自动检测对应的视频路径
 
         # 防抖定时器：滑块拖动时延迟200ms再触发预览
         self._preview_debounce_timer = QTimer(self)
@@ -58,7 +60,7 @@ class MainWindow(QMainWindow):
         """初始化窗口属性"""
         self.setWindowTitle("AI 视频增强系统 v1.0")
         self.setMinimumSize(1100, 700)
-        self.resize(1280, 800)
+        self.resize(1600, 1000)
         self.setStyleSheet("background-color: #2b2b2b; color: #eee;")
 
         # 启用拖拽
@@ -170,6 +172,9 @@ class MainWindow(QMainWindow):
         """加载视频文件并更新UI"""
         try:
             self._input_path = file_path
+            # 清除自动模型检测缓存（新视频需重新检测）
+            self._auto_resolved_key = None
+            self._auto_resolved_for = ""
             info = get_video_info(file_path)
             props = get_video_properties(file_path)
 
@@ -252,16 +257,88 @@ class MainWindow(QMainWindow):
             use_tiling=params["use_tiling"],
             tile_size=params["tile_size"],
             tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
         )
         self._preview_thread.result_signal.connect(self._on_preview_result)
         self._preview_thread.error_signal.connect(self._on_preview_error)
         self._preview_thread.start()
 
-    def _load_enhancer(self) -> bool:
-        """加载 AI 模型（已加载相同模型时跳过，避免重复加载）"""
+    def _resolve_model_key(self) -> str:
+        """
+        解析实际使用的模型 key。
+        如果用户选择了 "Auto"，则自动分析视频的第一帧来选择模型：
+        - 检测到人脸 → GFPGAN
+        - 否则 → RealESRGAN_x4
+        同一视频只检测一次，结果缓存。
+        """
         params = self.param_panel.get_parameters()
         model_key = params["model_key"]
+
+        if model_key != "Auto":
+            return model_key
+
+        if not self._input_path:
+            return "RealESRGAN_x4"
+
+        # 缓存：同一视频只检测一次
+        if (self._auto_resolved_key
+                and self._auto_resolved_for == self._input_path):
+            return self._auto_resolved_key
+
+        self.param_panel.append_log("🔍 正在分析视频内容...")
+
+        try:
+            import cv2
+            frame = read_single_frame(self._input_path, 0)
+            if frame is None:
+                self.param_panel.append_log("  无法读取帧，默认使用通用超分")
+                chosen = "RealESRGAN_x4"
+            else:
+                # OpenCV 的 CascadeClassifier 不支持中文路径，
+                # 用 Python 读取 XML 后写到系统临时目录（纯 ASCII 路径）
+                import shutil
+                import tempfile
+                cascade_src = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "weights", "haarcascade_frontalface_default.xml"
+                )
+                tmp_dir = os.path.join(tempfile.gettempdir(), "aivideo_cache")
+                os.makedirs(tmp_dir, exist_ok=True)
+                cascade_tmp = os.path.join(tmp_dir, "haarcascade_frontalface_default.xml")
+                if not os.path.exists(cascade_tmp):
+                    shutil.copy2(cascade_src, cascade_tmp)
+
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                face_cascade = cv2.CascadeClassifier(cascade_tmp)
+                faces = face_cascade.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30)
+                )
+
+                if len(faces) > 0:
+                    chosen = "GFPGAN_v1.4"
+                    self.param_panel.append_log(f"  检测到 {len(faces)} 张人脸 → 使用人像修复模式")
+                else:
+                    chosen = "RealESRGAN_x4"
+                    self.param_panel.append_log("  未检测到人脸 → 使用通用超分模式")
+
+            # 缓存结果
+            self._auto_resolved_key = chosen
+            self._auto_resolved_for = self._input_path
+
+            # 更新 UI 的放大倍率显示
+            self.param_panel.spin_scale.setValue(MODELS[chosen]["scale"])
+            return chosen
+
+        except Exception as e:
+            self.param_panel.append_log(f"  自动检测出错: {e}，默认使用通用超分")
+            return "RealESRGAN_x4"
+
+    def _load_enhancer(self) -> bool:
+        """加载 AI 模型（已加载相同模型时跳过，避免重复加载）"""
+        model_key = self._resolve_model_key()
         model_config = MODELS[model_key]
+        params = self.param_panel.get_parameters()
 
         # 如果已经加载了相同的模型，直接返回
         if (self._enhancer and self._enhancer.is_loaded
@@ -280,14 +357,15 @@ class MainWindow(QMainWindow):
             return False
 
         try:
-            self.param_panel.append_log(f"正在加载模型: {model_config['name']}...")
+            display = f"{model_config['icon']} {model_config['display_name']}"
+            self.param_panel.append_log(f"正在加载模型: {display}...")
 
             if "GFPGAN" in model_key:
                 from models.gfpgan_enhancer import GFPGANEnhancer
                 self._enhancer = GFPGANEnhancer()
                 self._enhancer.load_model(
                     weight_path=weight_path,
-                    upscale=params["scale"],
+                    upscale=model_config["scale"],
                 )
             else:
                 from models.realesrgan_enhancer import RealESRGANEnhancer
@@ -330,6 +408,8 @@ class MainWindow(QMainWindow):
             use_tiling=params["use_tiling"],
             tile_size=params["tile_size"],
             tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
         )
         self._preview_thread.result_signal.connect(self._on_preview_result)
         self._preview_thread.error_signal.connect(self._on_preview_error)
@@ -372,6 +452,8 @@ class MainWindow(QMainWindow):
             use_tiling=params["use_tiling"],
             tile_size=params["tile_size"],
             tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
         )
 
         # 连接信号
@@ -426,6 +508,12 @@ class MainWindow(QMainWindow):
         """处理状态更新"""
         self.statusBar().showMessage(message)
         self.param_panel.append_log(message)
+
+        # 取消处理后恢复 UI 状态
+        if "已取消" in message:
+            self.param_panel.set_processing_state(False)
+            self.param_panel.lbl_status.setText("已取消")
+            self.param_panel.append_log("⏹ 处理已取消，可重新操作")
 
     def _on_compare_videos(self):
         """打开视频对比播放窗口"""

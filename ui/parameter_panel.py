@@ -5,7 +5,8 @@
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
-    QGroupBox, QPushButton, QProgressBar, QTextEdit
+    QGroupBox, QPushButton, QProgressBar, QTextEdit,
+    QSlider
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from config import MODELS, DEFAULT_TILE_SIZE, DEFAULT_TILE_PAD, DEFAULT_SCALE
@@ -70,34 +71,75 @@ class ParameterPanel(QWidget):
         model_layout = QVBoxLayout()
 
         # 模型选择
-        model_layout.addWidget(QLabel("模型:"))
+        model_layout.addWidget(QLabel("增强模式:"))
         self.combo_model = QComboBox()
         for key, cfg in MODELS.items():
-            self.combo_model.addItem(f"{cfg['name']} - {cfg['description']}", key)
+            icon = cfg.get('icon', '')
+            display = cfg.get('display_name', cfg['name'])
+            desc = cfg.get('description', '')
+            self.combo_model.addItem(f"{icon} {display}", key)
         self.combo_model.setStyleSheet(self._combo_style())
+        self.combo_model.setToolTip("选择适合视频内容的增强模式")
+        self.combo_model.currentIndexChanged.connect(self._on_model_changed)
         model_layout.addWidget(self.combo_model)
 
-        # 放大倍率
+        # 模型说明
+        self.lbl_model_desc = QLabel("")
+        self.lbl_model_desc.setWordWrap(True)
+        self.lbl_model_desc.setStyleSheet("color: #999; font-size: 11px; padding: 2px 4px;")
+        model_layout.addWidget(self.lbl_model_desc)
+
+        # 放大倍率 (可自定义，默认跟随模型)
         scale_layout = QHBoxLayout()
         scale_layout.addWidget(QLabel("放大倍率:"))
         self.spin_scale = QSpinBox()
         self.spin_scale.setRange(1, 4)
         self.spin_scale.setValue(DEFAULT_SCALE)
         self.spin_scale.setStyleSheet(self._spin_style())
+        self.spin_scale.setToolTip("设置输出视频的放大倍率\n切换模型时自动同步，也可手动调整")
         scale_layout.addWidget(self.spin_scale)
         scale_layout.addWidget(QLabel("x"))
         model_layout.addLayout(scale_layout)
 
-        # 降噪强度
-        denoise_layout = QHBoxLayout()
-        denoise_layout.addWidget(QLabel("降噪强度:"))
+        # 降噪强度 (滑块 + 输入框 联动)
+        denoise_layout = QVBoxLayout()
+        denoise_header = QHBoxLayout()
+        denoise_header.addWidget(QLabel("降噪强度:"))
         self.spin_denoise = QDoubleSpinBox()
         self.spin_denoise.setRange(0.0, 1.0)
         self.spin_denoise.setSingleStep(0.1)
-        self.spin_denoise.setValue(0.5)
+        self.spin_denoise.setDecimals(1)
+        self.spin_denoise.setValue(0.0)
+        self.spin_denoise.setFixedWidth(65)
         self.spin_denoise.setStyleSheet(self._spin_style())
-        denoise_layout.addWidget(self.spin_denoise)
+        self.spin_denoise.setToolTip("设为 0 关闭降噪\n数值越大降噪越强但细节会减少")
+        self.spin_denoise.valueChanged.connect(self._on_denoise_spin_changed)
+        denoise_header.addWidget(self.spin_denoise)
+        denoise_header.addStretch()
+        denoise_layout.addLayout(denoise_header)
+
+        self.slider_denoise = QSlider(Qt.Horizontal)
+        self.slider_denoise.setRange(0, 10)  # 0~10 对应 0.0~1.0
+        self.slider_denoise.setValue(0)
+        self.slider_denoise.setTickPosition(QSlider.TicksBelow)
+        self.slider_denoise.setTickInterval(1)
+        self.slider_denoise.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 4px; background: #444; border-radius: 2px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078d4; width: 14px; margin: -5px 0; border-radius: 7px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #0078d4; border-radius: 2px;
+            }
+        """)
+        self.slider_denoise.valueChanged.connect(self._on_denoise_slider_changed)
+        denoise_layout.addWidget(self.slider_denoise)
         model_layout.addLayout(denoise_layout)
+
+        # 初始化模型描述
+        self._on_model_changed(0)
 
         model_group.setLayout(model_layout)
         layout.addWidget(model_group)
@@ -321,6 +363,28 @@ class ParameterPanel(QWidget):
     def is_realtime_preview_on(self) -> bool:
         """实时预览是否开启"""
         return self.btn_realtime_preview.isChecked()
+
+    def _on_model_changed(self, index: int):
+        """模型选择变化时更新说明和放大倍率"""
+        model_key = self.combo_model.currentData()
+        if model_key and model_key in MODELS:
+            cfg = MODELS[model_key]
+            self.lbl_model_desc.setText(f"📝 {cfg['description']}")
+            self.spin_scale.setValue(cfg['scale'])
+
+    def _on_denoise_spin_changed(self, value: float):
+        """降噪输入框变化 → 同步滑块"""
+        slider_val = int(round(value * 10))
+        self.slider_denoise.blockSignals(True)
+        self.slider_denoise.setValue(slider_val)
+        self.slider_denoise.blockSignals(False)
+
+    def _on_denoise_slider_changed(self, value: int):
+        """降噪滑块变化 → 同步输入框"""
+        spin_val = value / 10.0
+        self.spin_denoise.blockSignals(True)
+        self.spin_denoise.setValue(spin_val)
+        self.spin_denoise.blockSignals(False)
 
     def _on_realtime_toggled(self, checked: bool):
         """实时预览开关切换"""

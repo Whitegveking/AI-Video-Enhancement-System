@@ -4,6 +4,7 @@
 """
 import os
 import time
+import cv2
 from typing import Optional, Callable
 
 from config import TEMP_DIR, OUTPUT_DIR, DEFAULT_TILE_SIZE, DEFAULT_TILE_PAD
@@ -33,6 +34,26 @@ class VideoProcessor:
         """取消处理"""
         self._cancelled = True
 
+    def _denoise_frame(self, bgr_frame, denoise_strength: float):
+        """
+        应用降噪预处理（AI推理前）
+
+        Args:
+            bgr_frame: BGR uint8 帧
+            denoise_strength: 降噪强度 (0.0~1.0)  0=不降噪
+
+        Returns:
+            降噪后的 BGR 帧
+        """
+        if denoise_strength <= 0:
+            return bgr_frame
+        # 将 0~1 映射到 h 参数 (0~30)
+        h = int(denoise_strength * 30)
+        h_color = max(h // 2, 1)
+        return cv2.fastNlMeansDenoisingColored(
+            bgr_frame, None, h, h_color, 7, 21
+        )
+
     def process_video(
         self,
         input_path: str,
@@ -40,6 +61,8 @@ class VideoProcessor:
         use_tiling: bool = True,
         tile_size: int = DEFAULT_TILE_SIZE,
         tile_pad: int = DEFAULT_TILE_PAD,
+        denoise_strength: float = 0.0,
+        outscale: int = 0,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
         preview_callback: Optional[Callable] = None,
     ) -> str:
@@ -52,6 +75,8 @@ class VideoProcessor:
             use_tiling: 是否使用分块处理
             tile_size: 分块大小
             tile_pad: 分块重叠填充
+            denoise_strength: 降噪强度 (0.0~1.0)
+            outscale: 用户期望的输出放大倍率 (0=使用模型原生倍率)
             progress_callback: 进度回调 (current_frame, total_frames, fps)
             preview_callback: 预览帧回调 (rgb_frame)
 
@@ -70,11 +95,17 @@ class VideoProcessor:
         total_frames = props["total_frames"]
         fps = props["fps"]
         in_w, in_h = props["width"], props["height"]
-        out_w = in_w * self.enhancer.scale
-        out_h = in_h * self.enhancer.scale
+        # 确定实际输出倍率：用户指定 > 0 时用用户值，否则用模型原生倍率
+        actual_scale = outscale if outscale > 0 else self.enhancer.scale
+        model_scale = self.enhancer.scale
+        need_resize = (actual_scale != model_scale)
+        out_w = in_w * actual_scale
+        out_h = in_h * actual_scale
 
         print(f"[流水线] 输入: {in_w}x{in_h} @ {fps:.2f}fps, 共 {total_frames} 帧")
-        print(f"[流水线] 输出: {out_w}x{out_h}, 模型: {self.enhancer.model_name}, scale={self.enhancer.scale}")
+        print(f"[流水线] 输出: {out_w}x{out_h}, 模型: {self.enhancer.model_name} ({model_scale}x), 输出倍率: {actual_scale}x")
+        if denoise_strength > 0:
+            print(f"[流水线] 降噪强度: {denoise_strength:.1f}")
 
         # ========== 2. 提取音频 ==========
         audio_path = None
@@ -88,7 +119,7 @@ class VideoProcessor:
             base_name = os.path.splitext(os.path.basename(input_path))[0]
             output_path = os.path.join(
                 OUTPUT_DIR,
-                f"{base_name}_enhanced_{self.enhancer.scale}x.mp4"
+                f"{base_name}_enhanced_{actual_scale}x.mp4"
             )
 
         # 临时无声视频路径
@@ -111,6 +142,9 @@ class VideoProcessor:
                     return ""
 
                 # BGR -> RGB (模型需要 RGB 输入)
+                # 降噪预处理 (如果启用)
+                if denoise_strength > 0:
+                    bgr_frame = self._denoise_frame(bgr_frame, denoise_strength)
                 rgb_frame = bgr_to_rgb(bgr_frame)
 
                 # AI 推理
@@ -123,6 +157,15 @@ class VideoProcessor:
 
                 # RGB -> BGR (OpenCV 写入需要 BGR)
                 enhanced_bgr = rgb_to_bgr(enhanced_rgb)
+
+                # 如果用户指定倍率与模型原生倍率不同，后处理 resize
+                if need_resize:
+                    enhanced_bgr = cv2.resize(
+                        enhanced_bgr, (out_w, out_h),
+                        interpolation=cv2.INTER_LANCZOS4
+                    )
+                    enhanced_rgb = rgb_to_bgr(enhanced_bgr)  # 更新预览用的 RGB
+                    enhanced_rgb = bgr_to_rgb(enhanced_bgr)
 
                 # 写入帧
                 writer.write_frame(enhanced_bgr)
@@ -169,6 +212,8 @@ class VideoProcessor:
         use_tiling: bool = True,
         tile_size: int = DEFAULT_TILE_SIZE,
         tile_pad: int = DEFAULT_TILE_PAD,
+        denoise_strength: float = 0.0,
+        outscale: int = 0,
     ):
         """
         处理单帧（用于预览功能）
@@ -179,6 +224,8 @@ class VideoProcessor:
             use_tiling: 是否使用分块
             tile_size: 分块大小
             tile_pad: 分块填充
+            denoise_strength: 降噪强度 (0.0~1.0)
+            outscale: 用户期望的输出放大倍率 (0=使用模型原生倍率)
 
         Returns:
             (原始RGB帧, 增强RGB帧) 元组
@@ -191,11 +238,26 @@ class VideoProcessor:
 
         rgb_frame = bgr_to_rgb(bgr_frame)
 
+        # 降噪预处理
+        if denoise_strength > 0:
+            bgr_frame = self._denoise_frame(bgr_frame, denoise_strength)
+            rgb_frame = bgr_to_rgb(bgr_frame)
+
         if use_tiling:
             enhanced_rgb = self.enhancer.enhance_with_tiling(
                 rgb_frame, tile_size, tile_pad
             )
         else:
             enhanced_rgb = self.enhancer.enhance_frame(rgb_frame)
+
+        # 如果用户指定倍率与模型原生倍率不同，后处理 resize
+        actual_scale = outscale if outscale > 0 else self.enhancer.scale
+        if actual_scale != self.enhancer.scale:
+            h, w = rgb_frame.shape[:2]
+            new_w, new_h = w * actual_scale, h * actual_scale
+            enhanced_rgb = cv2.resize(
+                enhanced_rgb, (new_w, new_h),
+                interpolation=cv2.INTER_LANCZOS4
+            )
 
         return rgb_frame, enhanced_rgb
