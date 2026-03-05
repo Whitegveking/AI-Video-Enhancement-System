@@ -16,14 +16,14 @@ from PyQt5.QtGui import QIcon, QDragEnterEvent, QDropEvent
 # 将项目根目录加入路径
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import SUPPORTED_VIDEO_FORMATS, MODELS, WEIGHTS_DIR
+from config import SUPPORTED_VIDEO_FORMATS, MODELS, WEIGHTS_DIR, RIFE_MODEL
 from ui.video_preview import VideoPreviewWidget
 from ui.parameter_panel import ParameterPanel
 from ui.video_compare_dialog import VideoCompareDialog
 from utils.ffmpeg_utils import get_video_info
 from utils.video_io import get_video_properties, read_single_frame
 from utils.color_utils import bgr_to_rgb
-from core.worker_thread import VideoWorkerThread, PreviewWorkerThread
+from core.worker_thread import VideoWorkerThread, PreviewWorkerThread, InterpolationWorkerThread
 
 
 class MainWindow(QMainWindow):
@@ -43,6 +43,16 @@ class MainWindow(QMainWindow):
         self._output_path = ""  # 最近一次处理的输出文件路径
         self._auto_resolved_key = None  # 自动模式检测缓存，每个视频只检测一次
         self._auto_resolved_for = ""  # 记录上次自动检测对应的视频路径
+
+        # 补帧相关
+        self._rife = None                     # RIFE 模型实例
+        self._rife_loaded = False              # RIFE 是否已加载
+        self._interp_thread = None             # 补帧工作线程
+        self._video_fps = 0.0                  # 当前视频帧率 (补帧信息用)
+
+        # 联合处理（超分+补帧）
+        self._combined_mode = False            # 是否处于联合处理模式
+        self._combined_sr_output = ""          # 超分输出路径（用于传递给补帧）
 
         # 防抖定时器：滑块拖动时延迟200ms再触发预览
         self._preview_debounce_timer = QTimer(self)
@@ -124,9 +134,16 @@ class MainWindow(QMainWindow):
         self.param_panel.import_video.connect(self._on_import_video)
         self.param_panel.start_processing.connect(self._on_start_processing)
         self.param_panel.cancel_processing.connect(self._on_cancel_processing)
+        self.param_panel.start_interpolation.connect(self._on_start_interpolation)
+        self.param_panel.start_combined.connect(self._on_start_combined)
         self.param_panel.preview_requested.connect(self._on_preview_frame)
         self.param_panel.preview_toggled.connect(self._on_realtime_preview_toggled)
         self.param_panel.compare_requested.connect(self._on_compare_videos)
+
+        # 补帧倍率变化时更新提示
+        self.param_panel.combo_interp_multi.currentIndexChanged.connect(
+            self._on_interp_multi_changed
+        )
 
         # 帧滑块
         self.preview_widget.frame_slider_changed.connect(self._on_frame_slider_changed)
@@ -184,6 +201,10 @@ class MainWindow(QMainWindow):
             # 更新预览区
             self.preview_widget.set_total_frames(props["total_frames"])
 
+            # 保存帧率 & 更新补帧信息
+            self._video_fps = info.get("fps", 0.0)
+            self.param_panel.update_interp_info(self._video_fps)
+
             # 显示第一帧
             first_frame = read_single_frame(file_path, 0)
             if first_frame is not None:
@@ -237,7 +258,7 @@ class MainWindow(QMainWindow):
             self.param_panel.append_log("🔴 实时预览已关闭")
 
     def _on_debounced_preview(self):
-        """防抖后触发的实时预览（滑块停止拖动300ms后执行）"""
+        """防抖后触发的实时预览（滑块停止拖动200ms后执行）"""
         if not self._realtime_preview_on or not self._input_path:
             return
         if not self._enhancer or not self._enhancer.is_loaded:
@@ -467,9 +488,13 @@ class MainWindow(QMainWindow):
 
     def _on_cancel_processing(self):
         """取消处理"""
+        self._combined_mode = False
         if self._worker_thread and self._worker_thread.isRunning():
             self._worker_thread.cancel()
-            self.param_panel.append_log("⏹ 正在取消...")
+            self.param_panel.append_log("⏹ 正在取消超分...")
+        if self._interp_thread and self._interp_thread.isRunning():
+            self._interp_thread.cancel()
+            self.param_panel.append_log("⏹ 正在取消补帧...")
 
     def _on_processing_progress(self, current: int, total: int, fps: float):
         """处理进度更新"""
@@ -482,6 +507,16 @@ class MainWindow(QMainWindow):
     def _on_processing_finished(self, output_path: str):
         """处理完成"""
         self._output_path = output_path
+
+        # 联合模式：超分完成后自动启动补帧
+        if self._combined_mode:
+            self._combined_sr_output = output_path
+            self.param_panel.append_log(f"✓ 超分完成: {output_path}")
+            self.param_panel.append_log("⏩ 联合模式：自动开始补帧...")
+            self.param_panel.progress_bar.setValue(0)
+            self._start_interpolation_on(output_path)
+            return
+
         self.param_panel.set_processing_state(False)
         self.param_panel.progress_bar.setValue(100)
         self.param_panel.lbl_status.setText("处理完成！")
@@ -494,11 +529,12 @@ class MainWindow(QMainWindow):
         QMessageBox.information(
             self, "处理完成",
             f"视频增强完成！\n\n输出路径:\n{output_path}\n\n"
-            f"点击「🎬 对比播放」可同步对比原始与增强视频"
+            f"点击「对比播放」可同步对比原始与增强视频"
         )
 
     def _on_processing_error(self, error_msg: str):
         """处理出错"""
+        self._combined_mode = False
         self.param_panel.set_processing_state(False)
         self.param_panel.append_log(f"✗ 错误: {error_msg}")
         self.statusBar().showMessage("处理失败")
@@ -511,6 +547,7 @@ class MainWindow(QMainWindow):
 
         # 取消处理后恢复 UI 状态
         if "已取消" in message:
+            self._combined_mode = False
             self.param_panel.set_processing_state(False)
             self.param_panel.lbl_status.setText("已取消")
             self.param_panel.append_log("⏹ 处理已取消，可重新操作")
@@ -529,19 +566,188 @@ class MainWindow(QMainWindow):
         dlg = VideoCompareDialog(self._input_path, self._output_path, parent=self)
         dlg.exec_()
 
+    # =====================================================
+    # 联合处理（超分 + 补帧）
+    # =====================================================
+
+    def _on_start_combined(self):
+        """开始联合处理（先超分 → 再补帧）"""
+        if not self._input_path:
+            QMessageBox.information(self, "提示", "请先导入视频")
+            return
+
+        # 预加载两个模型
+        if not self._load_enhancer():
+            return
+        if not self._load_rife():
+            return
+
+        # 设置联合模式标记
+        self._combined_mode = True
+        self._combined_sr_output = ""
+
+        params = self.param_panel.get_parameters()
+        multiplier = self.param_panel.get_interp_multiplier()
+
+        # 切换UI为处理状态
+        self.param_panel.set_processing_state(True)
+        self.param_panel.progress_bar.setValue(0)
+        self.param_panel.append_log("=" * 40)
+        self.param_panel.append_log(
+            f"🚀 开始联合处理（超分 + {multiplier}x 补帧）"
+        )
+        self.param_panel.append_log("第 1 步：视频超分...")
+
+        # 先启动超分
+        self._worker_thread = VideoWorkerThread(self)
+        self._worker_thread.setup(
+            enhancer=self._enhancer,
+            input_path=self._input_path,
+            use_tiling=params["use_tiling"],
+            tile_size=params["tile_size"],
+            tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
+        )
+
+        self._worker_thread.progress_signal.connect(self._on_processing_progress)
+        self._worker_thread.preview_signal.connect(self._on_processing_preview)
+        self._worker_thread.finished_signal.connect(self._on_processing_finished)
+        self._worker_thread.error_signal.connect(self._on_processing_error)
+        self._worker_thread.status_signal.connect(self._on_processing_status)
+
+        self._worker_thread.start()
+
+    def _start_interpolation_on(self, video_path: str):
+        """对指定视频执行补帧（联合模式专用）"""
+        multiplier = self.param_panel.get_interp_multiplier()
+
+        self.param_panel.append_log(f"第 2 步：视频补帧 ({multiplier}x)...")
+
+        self._interp_thread = InterpolationWorkerThread(self)
+        self._interp_thread.setup(
+            rife=self._rife,
+            input_path=video_path,
+            multiplier=multiplier,
+        )
+
+        self._interp_thread.progress_signal.connect(self._on_processing_progress)
+        self._interp_thread.preview_signal.connect(self._on_processing_preview)
+        self._interp_thread.finished_signal.connect(self._on_combined_interp_finished)
+        self._interp_thread.error_signal.connect(self._on_processing_error)
+        self._interp_thread.status_signal.connect(self._on_processing_status)
+
+        self._interp_thread.start()
+
+    def _on_combined_interp_finished(self, output_path: str):
+        """联合模式补帧完成"""
+        self._combined_mode = False
+        self._output_path = output_path
+        self.param_panel.set_processing_state(False)
+        self.param_panel.progress_bar.setValue(100)
+        self.param_panel.lbl_status.setText("联合处理完成！")
+        self.param_panel.append_log(f"✓ 补帧完成: {output_path}")
+        self.param_panel.append_log("=" * 40)
+        self.param_panel.append_log("✓ 联合处理全部完成！")
+        self.statusBar().showMessage(f"输出: {output_path}")
+
+        # 启用对比播放按钮
+        self.param_panel.btn_compare.setEnabled(True)
+
+        QMessageBox.information(
+            self, "联合处理完成",
+            f"超分 + 补帧全部完成！\n\n"
+            f"超分输出:\n{self._combined_sr_output}\n\n"
+            f"最终输出:\n{output_path}\n\n"
+            f"点击「对比播放」可同步对比原始与最终视频"
+        )
+
+    # =====================================================
+    # 补帧功能
+    # =====================================================
+
+    def _on_interp_multi_changed(self):
+        """补帧倍率变化时更新提示"""
+        if self._video_fps > 0:
+            self.param_panel.update_interp_info(self._video_fps)
+
+    def _load_rife(self) -> bool:
+        """加载 RIFE 补帧模型（已加载时跳过）"""
+        if self._rife and self._rife.is_loaded:
+            return True
+
+        weight_path = os.path.join(WEIGHTS_DIR, RIFE_MODEL["weight_file"])
+        if not os.path.exists(weight_path):
+            QMessageBox.warning(
+                self, "缺少 RIFE 权重",
+                f"补帧模型权重文件不存在:\n{weight_path}\n\n"
+                f"请从以下地址下载 flownet.pkl:\n{RIFE_MODEL['weight_url']}\n\n"
+                f"并放到:\n{WEIGHTS_DIR}"
+            )
+            return False
+
+        try:
+            self.param_panel.append_log("正在加载 RIFE 补帧模型...")
+            from models.rife_interpolator import RIFEInterpolator
+            self._rife = RIFEInterpolator()
+            params = self.param_panel.get_parameters()
+            self._rife.load_model(weight_path, half=params["half"])
+            self.param_panel.append_log("✓ RIFE 模型加载完成")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "RIFE 加载失败", str(e))
+            self.param_panel.append_log(f"✗ RIFE 加载失败: {str(e)}")
+            return False
+
+    def _on_start_interpolation(self):
+        """开始视频补帧"""
+        if not self._input_path:
+            QMessageBox.information(self, "提示", "请先导入视频")
+            return
+
+        if not self._load_rife():
+            return
+
+        multiplier = self.param_panel.get_interp_multiplier()
+
+        # 切换 UI 为处理状态
+        self.param_panel.set_processing_state(True)
+        self.param_panel.progress_bar.setValue(0)
+        self.param_panel.append_log("=" * 40)
+        self.param_panel.append_log(f"🎞️ 开始视频补帧 ({multiplier}x)")
+
+        # 创建并启动补帧工作线程
+        self._interp_thread = InterpolationWorkerThread(self)
+        self._interp_thread.setup(
+            rife=self._rife,
+            input_path=self._input_path,
+            multiplier=multiplier,
+        )
+
+        # 连接信号 (复用超分的进度/预览/完成/错误处理)
+        self._interp_thread.progress_signal.connect(self._on_processing_progress)
+        self._interp_thread.preview_signal.connect(self._on_processing_preview)
+        self._interp_thread.finished_signal.connect(self._on_processing_finished)
+        self._interp_thread.error_signal.connect(self._on_processing_error)
+        self._interp_thread.status_signal.connect(self._on_processing_status)
+
+        self._interp_thread.start()
+
     def _show_about(self):
         """显示关于对话框"""
         QMessageBox.about(
             self, "关于",
             "AI 视频增强系统 v1.0\n\n"
-            "基于深度学习的视频超分辨率与画质增强\n\n"
+            "基于深度学习的视频超分辨率、画质增强与补帧\n\n"
             "技术栈: PyTorch + OpenCV + FFmpeg + PyQt5\n"
-            "模型: Real-ESRGAN / GFPGAN\n\n"
+            "超分模型: Real-ESRGAN / GFPGAN\n"
+            "补帧模型: RIFE v4\n\n"
             "毕业设计作品"
         )
 
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 检查超分线程
         if self._worker_thread and self._worker_thread.isRunning():
             reply = QMessageBox.question(
                 self, "确认退出",
@@ -555,8 +761,24 @@ class MainWindow(QMainWindow):
             self._worker_thread.cancel()
             self._worker_thread.wait(3000)
 
+        # 检查补帧线程
+        if self._interp_thread and self._interp_thread.isRunning():
+            reply = QMessageBox.question(
+                self, "确认退出",
+                "补帧正在处理中，确定要退出吗？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                event.ignore()
+                return
+            self._interp_thread.cancel()
+            self._interp_thread.wait(3000)
+
         # 释放模型
         if self._enhancer:
             self._enhancer.release()
+        if self._rife:
+            self._rife.release()
 
         event.accept()

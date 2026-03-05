@@ -73,6 +73,17 @@ DEFAULT_SCALE = 4             # 默认放大倍率
 DEFAULT_DENOISE = 0.5         # 默认降噪强度 (0~1)
 DEFAULT_MODEL = "RealESRGAN_x4"
 
+# ===================== 补帧配置 =====================
+RIFE_MODEL = {
+    "name": "RIFE_v4",
+    "icon": "🎞️",
+    "display_name": "RIFE v4 补帧",
+    "weight_file": "flownet.pkl",
+    "weight_url": "https://github.com/hzwer/Practical-RIFE",
+    "description": "基于 RIFE 光流估计的实时视频补帧",
+}
+DEFAULT_INTERP_MULTI = 2      # 默认补帧倍率 (2x / 4x)
+
 # ===================== 支持的视频格式 =====================
 SUPPORTED_VIDEO_FORMATS = [".mp4", ".avi", ".mkv", ".flv", ".mov", ".wmv", ".webm"]
 

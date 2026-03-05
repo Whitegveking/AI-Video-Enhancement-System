@@ -6,35 +6,50 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
     QGroupBox, QPushButton, QProgressBar, QTextEdit,
-    QSlider
+    QSlider, QScrollArea
 )
 from PyQt5.QtCore import Qt, pyqtSignal
-from config import MODELS, DEFAULT_TILE_SIZE, DEFAULT_TILE_PAD, DEFAULT_SCALE
+from PyQt5.QtGui import QFont
+from config import MODELS, DEFAULT_TILE_SIZE, DEFAULT_TILE_PAD, DEFAULT_SCALE, DEFAULT_INTERP_MULTI
 
 
 class ParameterPanel(QWidget):
     """
     右侧参数配置面板
-    包含模型选择、处理参数、操作按钮和日志输出
+    包含模型选择、处理参数、补帧设置、操作按钮和日志输出
     """
 
     # 信号
     start_processing = pyqtSignal()
     cancel_processing = pyqtSignal()
+    start_interpolation = pyqtSignal()     # 开始补帧
+    start_combined = pyqtSignal()          # 超分 + 补帧联合处理
     preview_requested = pyqtSignal()
-    preview_toggled = pyqtSignal(bool)  # 实时预览开关状态变化
-    compare_requested = pyqtSignal()    # 视频对比播放
+    preview_toggled = pyqtSignal(bool)     # 实时预览开关状态变化
+    compare_requested = pyqtSignal()       # 视频对比播放
     import_video = pyqtSignal()
+
+    # Windows 下支持 emoji 显示的字体
+    EMOJI_FONT = QFont("Segoe UI Emoji", 10)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedWidth(320)
+        self.setFixedWidth(340)
         self._init_ui()
 
     def _init_ui(self):
-        layout = QVBoxLayout(self)
+        # 使用 QScrollArea 包裹，防止控件过多时溢出
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setStyleSheet(
+            "QScrollArea { border: none; background: transparent; }"
+            "QScrollArea > QWidget > QWidget { background: transparent; }"
+        )
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
         # ========== 导入按钮 ==========
         self.btn_import = QPushButton("📂 导入视频")
@@ -69,14 +84,15 @@ class ParameterPanel(QWidget):
         model_group = QGroupBox("AI 模型设置")
         model_group.setStyleSheet(self._group_style())
         model_layout = QVBoxLayout()
+        model_layout.setSpacing(8)
 
         # 模型选择
         model_layout.addWidget(QLabel("增强模式:"))
         self.combo_model = QComboBox()
+        self.combo_model.setFont(self.EMOJI_FONT)
         for key, cfg in MODELS.items():
             icon = cfg.get('icon', '')
             display = cfg.get('display_name', cfg['name'])
-            desc = cfg.get('description', '')
             self.combo_model.addItem(f"{icon} {display}", key)
         self.combo_model.setStyleSheet(self._combo_style())
         self.combo_model.setToolTip("选择适合视频内容的增强模式")
@@ -148,6 +164,7 @@ class ParameterPanel(QWidget):
         adv_group = QGroupBox("高级设置")
         adv_group.setStyleSheet(self._group_style())
         adv_layout = QVBoxLayout()
+        adv_layout.setSpacing(8)
 
         # Tiling 开关
         self.chk_tiling = QCheckBox("启用分块处理 (防止显存溢出)")
@@ -188,6 +205,33 @@ class ParameterPanel(QWidget):
         adv_group.setLayout(adv_layout)
         layout.addWidget(adv_group)
 
+        # ========== 补帧设置 ==========
+        interp_group = QGroupBox("补帧设置 (RIFE)")
+        interp_group.setStyleSheet(self._group_style())
+        interp_layout = QVBoxLayout()
+        interp_layout.setSpacing(8)
+
+        # 补帧倍率
+        multi_layout = QHBoxLayout()
+        multi_layout.addWidget(QLabel("补帧倍率:"))
+        self.combo_interp_multi = QComboBox()
+        self.combo_interp_multi.addItem("2x (双倍帧率)", 2)
+        self.combo_interp_multi.addItem("4x (四倍帧率)", 4)
+        self.combo_interp_multi.setCurrentIndex(0 if DEFAULT_INTERP_MULTI == 2 else 1)
+        self.combo_interp_multi.setStyleSheet(self._combo_style())
+        self.combo_interp_multi.setToolTip("选择帧率提升倍数\n2x: 30fps → 60fps\n4x: 30fps → 120fps")
+        multi_layout.addWidget(self.combo_interp_multi)
+        interp_layout.addLayout(multi_layout)
+
+        # 目标帧率提示
+        self.lbl_interp_info = QLabel("📝 导入视频后显示目标帧率")
+        self.lbl_interp_info.setWordWrap(True)
+        self.lbl_interp_info.setStyleSheet("color: #999; font-size: 11px; padding: 2px 4px;")
+        interp_layout.addWidget(self.lbl_interp_info)
+
+        interp_group.setLayout(interp_layout)
+        layout.addWidget(interp_group)
+
         # ========== 操作按钮 ==========
         # 实时预览开关
         preview_row = QHBoxLayout()
@@ -221,7 +265,7 @@ class ParameterPanel(QWidget):
         preview_row.addWidget(self.btn_realtime_preview)
         layout.addLayout(preview_row)
 
-        self.btn_start = QPushButton("🚀 开始处理")
+        self.btn_start = QPushButton("🚀 开始超分")
         self.btn_start.setMinimumHeight(44)
         self.btn_start.setStyleSheet("""
             QPushButton {
@@ -238,6 +282,43 @@ class ParameterPanel(QWidget):
         """)
         self.btn_start.clicked.connect(self.start_processing.emit)
         layout.addWidget(self.btn_start)
+
+        self.btn_interpolate = QPushButton("🎞️ 开始补帧")
+        self.btn_interpolate.setMinimumHeight(44)
+        self.btn_interpolate.setStyleSheet("""
+            QPushButton {
+                background-color: #6b3fa0;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7d4dbd; }
+            QPushButton:pressed { background-color: #5a3590; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        self.btn_interpolate.clicked.connect(self.start_interpolation.emit)
+        layout.addWidget(self.btn_interpolate)
+
+        self.btn_combined = QPushButton("超分 + 补帧")
+        self.btn_combined.setMinimumHeight(44)
+        self.btn_combined.setStyleSheet("""
+            QPushButton {
+                background-color: #0e639c;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                font-size: 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #1177bb; }
+            QPushButton:pressed { background-color: #0a4f7d; }
+            QPushButton:disabled { background-color: #555; color: #888; }
+        """)
+        self.btn_combined.setToolTip("先超分再补帧，一键完成两项处理")
+        self.btn_combined.clicked.connect(self.start_combined.emit)
+        layout.addWidget(self.btn_combined)
 
         self.btn_cancel = QPushButton("⏹ 取消处理")
         self.btn_cancel.setMinimumHeight(36)
@@ -307,6 +388,11 @@ class ParameterPanel(QWidget):
 
         layout.addStretch()
 
+        scroll.setWidget(container)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
     # ========== 公共方法 ==========
 
     def get_model_key(self) -> str:
@@ -325,6 +411,18 @@ class ParameterPanel(QWidget):
             "half": self.chk_half.isChecked(),
         }
 
+    def get_interp_multiplier(self) -> int:
+        """获取当前补帧倍率"""
+        return self.combo_interp_multi.currentData()
+
+    def update_interp_info(self, original_fps: float):
+        """根据原始帧率更新补帧信息提示"""
+        multi = self.get_interp_multiplier()
+        target_fps = original_fps * multi
+        self.lbl_interp_info.setText(
+            f"📝 {original_fps:.1f}fps → {target_fps:.0f}fps ({multi}x 补帧)"
+        )
+
     def update_video_info(self, info: dict):
         """更新视频信息显示"""
         text = (
@@ -341,11 +439,14 @@ class ParameterPanel(QWidget):
     def set_processing_state(self, processing: bool):
         """设置处理状态（禁用/启用控件）"""
         self.btn_start.setEnabled(not processing)
+        self.btn_interpolate.setEnabled(not processing)
+        self.btn_combined.setEnabled(not processing)
         self.btn_cancel.setEnabled(processing)
         self.btn_import.setEnabled(not processing)
         self.btn_preview.setEnabled(not processing)
         self.btn_realtime_preview.setEnabled(not processing)
         self.combo_model.setEnabled(not processing)
+        self.combo_interp_multi.setEnabled(not processing)
         # 处理中关闭实时预览
         if processing and self.btn_realtime_preview.isChecked():
             self.btn_realtime_preview.setChecked(False)
@@ -431,7 +532,10 @@ class ParameterPanel(QWidget):
                 color: #eee;
                 border: 1px solid #555;
                 border-radius: 4px;
-                padding: 4px 8px;
+                padding: 6px 10px;
+                min-height: 24px;
+                font-family: 'Segoe UI Emoji', 'Segoe UI', sans-serif;
+                font-size: 13px;
             }
             QComboBox::drop-down {
                 border: none;
@@ -440,6 +544,8 @@ class ParameterPanel(QWidget):
                 background-color: #3c3c3c;
                 color: #eee;
                 selection-background-color: #0078d4;
+                font-family: 'Segoe UI Emoji', 'Segoe UI', sans-serif;
+                font-size: 13px;
             }
         """
 
@@ -451,7 +557,8 @@ class ParameterPanel(QWidget):
                 color: #eee;
                 border: 1px solid #555;
                 border-radius: 4px;
-                padding: 2px 6px;
+                padding: 4px 6px;
+                min-height: 22px;
             }
         """
 

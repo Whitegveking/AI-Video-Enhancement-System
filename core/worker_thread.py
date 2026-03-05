@@ -1,6 +1,7 @@
 """
 QThread 后台工作线程
 将耗时的 AI 推理任务放到后台线程执行，通过信号与槽更新 UI
+包含: 视频超分线程 / 单帧预览线程 / 视频补帧线程
 """
 import traceback
 import numpy as np
@@ -174,3 +175,77 @@ class PreviewWorkerThread(QThread):
             self.result_signal.emit(original, enhanced)
         except Exception as e:
             self.error_signal.emit(f"预览出错: {str(e)}")
+
+
+class InterpolationWorkerThread(QThread):
+    """
+    视频补帧后台工作线程
+    使用 RIFE 模型在后台执行视频补帧，通过信号更新 UI
+    """
+
+    # ========== 信号定义 ==========
+    progress_signal = pyqtSignal(int, int, float)   # (当前帧, 总帧数, fps)
+    preview_signal = pyqtSignal(np.ndarray)          # RGB 预览帧
+    finished_signal = pyqtSignal(str)                # 输出文件路径
+    error_signal = pyqtSignal(str)                   # 错误信息
+    status_signal = pyqtSignal(str)                  # 状态消息
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._processor = None
+        self._rife = None
+        self._input_path = ""
+        self._output_path = ""
+        self._multiplier = 2
+
+    def setup(self, rife, input_path: str, output_path: str = "", multiplier: int = 2):
+        """
+        配置补帧工作线程参数（在 start() 之前调用）
+
+        Args:
+            rife: 已加载的 RIFEInterpolator 实例
+            input_path: 输入视频路径
+            output_path: 输出视频路径（空字符串=自动生成）
+            multiplier: 补帧倍率 (2 / 4)
+        """
+        self._rife = rife
+        self._input_path = input_path
+        self._output_path = output_path or None
+        self._multiplier = multiplier
+
+    def run(self):
+        """线程主体 —— 执行视频补帧"""
+        try:
+            from core.frame_interpolator import FrameInterpolationProcessor
+
+            self.status_signal.emit("正在初始化补帧流水线...")
+            self._processor = FrameInterpolationProcessor(self._rife)
+
+            self.status_signal.emit("正在进行视频补帧...")
+            output_path = self._processor.interpolate_video(
+                input_path=self._input_path,
+                output_path=self._output_path,
+                multiplier=self._multiplier,
+                progress_callback=self._on_progress,
+                preview_callback=self._on_preview,
+            )
+
+            if output_path:
+                self.finished_signal.emit(output_path)
+            else:
+                self.status_signal.emit("补帧已取消")
+
+        except Exception as e:
+            error_msg = f"补帧出错: {str(e)}\n{traceback.format_exc()}"
+            self.error_signal.emit(error_msg)
+
+    def cancel(self):
+        """请求取消补帧"""
+        if self._processor:
+            self._processor.cancel()
+
+    def _on_progress(self, current: int, total: int, fps: float):
+        self.progress_signal.emit(current, total, fps)
+
+    def _on_preview(self, rgb_frame: np.ndarray):
+        self.preview_signal.emit(rgb_frame.copy())
