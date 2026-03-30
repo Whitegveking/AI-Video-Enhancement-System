@@ -20,7 +20,10 @@ print('tiling OK')
 from core.memory_manager import MemoryManager
 mm = MemoryManager()
 info = mm.get_gpu_memory_info()
-print(f'memory_manager OK, GPU: {info["device_name"]}, {info["total_mb"]:.0f}MB')
+if info.get("available"):
+	print(f'memory_manager OK, GPU: {info["device_name"]}, {info["total_mb"]:.0f}MB')
+else:
+	print('memory_manager OK, GPU: Not available (CPU runner)')
 
 from core.video_processor import VideoProcessor
 print('video_processor OK')
