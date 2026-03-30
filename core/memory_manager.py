@@ -41,7 +41,15 @@ class MemoryManager:
     def get_gpu_memory_info() -> dict:
         """获取当前 GPU 显存使用情况"""
         if not torch.cuda.is_available():
-            return {"available": False}
+            # 向后兼容：即使无 GPU 也返回完整键，避免调用方 KeyError
+            return {
+                "available": False,
+                "device_name": "CPU/No CUDA",
+                "total_mb": 0.0,
+                "allocated_mb": 0.0,
+                "cached_mb": 0.0,
+                "free_mb": 0.0,
+            }
 
         return {
             "available": True,
