@@ -184,6 +184,19 @@ python tests/test_e2e.py
 
 > `test_e2e.py` 需要在项目根目录准备 `test_input.mp4`。
 
+### 8.3 CI（持续集成）
+
+项目已提供 GitHub Actions 工作流：
+
+- 配置文件：`.github/workflows/ci.yml`
+- 触发时机：`push` / `pull_request` 到 `main` 或 `master`
+- 当前检查项：
+	1. 依赖安装（含 CPU 版 PyTorch）
+	2. Python 语法编译检查（`compileall`）
+	3. 冒烟测试（`python tests/test_imports.py`）
+
+该 CI 设计为“轻量门禁”：优先快速发现导入错误、语法错误和基础依赖问题。
+
 ---
 
 ## 9. 结合论文目标的改进建议（按优先级）
