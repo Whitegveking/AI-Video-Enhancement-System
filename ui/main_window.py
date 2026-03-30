@@ -402,8 +402,20 @@ class MainWindow(QMainWindow):
             return True
 
         except Exception as e:
-            QMessageBox.critical(self, "模型加载失败", str(e))
-            self.param_panel.append_log(f"✗ 模型加载失败: {str(e)}")
+            err_text = str(e)
+            if "numpy.dtype size changed" in err_text:
+                hint = (
+                    "检测到 NumPy/SciPy 二进制兼容性问题。\n\n"
+                    "建议使用项目专用环境 aivideo 运行：\n"
+                    "  D:\\毕设\\aivideo\\Scripts\\python.exe main.py\n\n"
+                    "或在当前环境重装匹配版本的 numpy/scipy。"
+                )
+                QMessageBox.critical(self, "模型加载失败", f"{err_text}\n\n{hint}")
+                self.param_panel.append_log("✗ 模型加载失败: NumPy/SciPy 二进制不兼容")
+                self.param_panel.append_log("  请切换到 aivideo 环境后重试")
+            else:
+                QMessageBox.critical(self, "模型加载失败", err_text)
+                self.param_panel.append_log(f"✗ 模型加载失败: {err_text}")
             return False
 
     def _on_preview_frame(self):
