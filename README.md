@@ -25,6 +25,10 @@
 
 ### 1.4 GUI 与交互
 - 拖拽导入视频
+- 批量导入与可视化批处理队列（串行调度）
+- 队列任务级状态跟踪（等待/处理中/完成/失败）
+- 失败隔离：单任务失败不阻塞后续任务
+- 任务级对比播放（对比选中任务）
 - 实时预览（带防抖）
 - 处理日志、进度条、可取消任务
 - 对比播放窗口：已改为**按时间同步**（适配补帧后帧率变化场景）
@@ -54,6 +58,7 @@ AI-Video-Enhancement-System/
 ├── config.py
 ├── requirements.txt
 ├── core/
+│   ├── batch_queue.py
 │   ├── video_processor.py
 │   ├── frame_interpolator.py
 │   ├── worker_thread.py
@@ -77,6 +82,7 @@ AI-Video-Enhancement-System/
 │   ├── video_io.py
 │   └── color_utils.py
 ├── tests/
+│   ├── test_batch_queue.py
 │   ├── test_imports.py
 │   └── test_e2e.py
 ├── output/
@@ -138,7 +144,8 @@ python main.py
 1. 导入视频
 2. 选择增强模式/倍率/降噪/分块参数
 3. 选择处理方式：超分 / 补帧 / 超分+补帧
-4. 处理完成后打开“对比播放”查看效果
+4. （可选）批量导入多个视频，启动批处理队列
+5. 处理完成后打开“对比播放”查看效果
 
 ---
 
@@ -184,7 +191,13 @@ python tests/test_e2e.py
 
 > `test_e2e.py` 需要在项目根目录准备 `test_input.mp4`。
 
-### 8.3 CI（持续集成）
+### 8.3 批处理队列测试
+
+```bash
+python tests/test_batch_queue.py
+```
+
+### 8.4 CI（持续集成）
 
 项目已提供 GitHub Actions 工作流：
 
@@ -223,8 +236,8 @@ python tests/test_e2e.py
 	- 与论文中的“可导出与加速”方向一致。
 	- 目标：同一接口切换后端，便于性能对比实验。
 
-5. **批处理队列模式**
-	- 支持多视频排队处理、失败重试、任务日志归档。
+5. **批处理队列增强**
+	- 已实现基础串行队列；建议继续增强暂停/恢复、任务持久化、断点续跑。
 
 6. **更细粒度日志与可观测性**
 	- 增加每阶段耗时（解码/推理/编码/合并）统计。

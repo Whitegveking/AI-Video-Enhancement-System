@@ -19,11 +19,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from config import SUPPORTED_VIDEO_FORMATS, MODELS, WEIGHTS_DIR, RIFE_MODEL
 from ui.video_preview import VideoPreviewWidget
 from ui.parameter_panel import ParameterPanel
+from ui.batch_queue_dialog import BatchQueueDialog
 from ui.video_compare_dialog import VideoCompareDialog
 from utils.ffmpeg_utils import get_video_info
 from utils.video_io import get_video_properties, read_single_frame
 from utils.color_utils import bgr_to_rgb
 from core.worker_thread import VideoWorkerThread, PreviewWorkerThread, InterpolationWorkerThread
+from core.batch_queue import BatchQueueManager, BatchTask
 
 
 class MainWindow(QMainWindow):
@@ -53,6 +55,12 @@ class MainWindow(QMainWindow):
         # 联合处理（超分+补帧）
         self._combined_mode = False            # 是否处于联合处理模式
         self._combined_sr_output = ""          # 超分输出路径（用于传递给补帧）
+
+        # 批处理队列
+        self._batch_queue = BatchQueueManager()
+        self._batch_running = False
+        self._active_batch_task_id = None
+        self._batch_dialog = None
 
         # 防抖定时器：滑块拖动时延迟200ms再触发预览
         self._preview_debounce_timer = QTimer(self)
@@ -136,6 +144,13 @@ class MainWindow(QMainWindow):
         self.param_panel.cancel_processing.connect(self._on_cancel_processing)
         self.param_panel.start_interpolation.connect(self._on_start_interpolation)
         self.param_panel.start_combined.connect(self._on_start_combined)
+        self.param_panel.import_batch_videos.connect(self._on_import_batch_videos)
+        self.param_panel.open_batch_manager.connect(self._on_open_batch_manager)
+        self.param_panel.start_batch_queue.connect(self._on_start_batch_queue)
+        self.param_panel.clear_batch_queue.connect(self._on_clear_batch_queue)
+        self.param_panel.remove_batch_task.connect(self._on_remove_batch_task)
+        self.param_panel.retry_batch_task.connect(self._on_retry_batch_task)
+        self.param_panel.compare_batch_task.connect(self._on_compare_batch_task)
         self.param_panel.preview_requested.connect(self._on_preview_frame)
         self.param_panel.preview_toggled.connect(self._on_realtime_preview_toggled)
         self.param_panel.compare_requested.connect(self._on_compare_videos)
@@ -184,6 +199,319 @@ class MainWindow(QMainWindow):
         )
         if file_path:
             self._load_video(file_path)
+
+    # =====================================================
+    # 批处理队列
+    # =====================================================
+
+    @staticmethod
+    def _mode_display(mode_key: str) -> str:
+        return {
+            "sr": "超分",
+            "interp": "补帧",
+            "combined": "超分+补帧",
+        }.get(mode_key, mode_key)
+
+    @staticmethod
+    def _status_display(status_key: str) -> str:
+        return {
+            "pending": "等待中",
+            "running": "处理中",
+            "done": "已完成",
+            "failed": "失败",
+            "cancelled": "已取消",
+        }.get(status_key, status_key)
+
+    def _task_progress_display(self, task: BatchTask) -> str:
+        if task.status == "failed" and task.progress <= 0:
+            return "--"
+        return f"{int(task.progress)}%"
+
+    def _refresh_batch_panel_table(self):
+        self.param_panel.clear_batch_items()
+        for task in self._batch_queue.tasks:
+            self.param_panel.add_batch_item(
+                task.task_id,
+                os.path.basename(task.input_path),
+                self._mode_display(task.mode),
+            )
+            self.param_panel.update_batch_item(
+                task.task_id,
+                status=self._status_display(task.status),
+                progress=self._task_progress_display(task),
+            )
+
+    def _refresh_batch_views(self):
+        self._refresh_batch_panel_table()
+        if self._batch_dialog is not None:
+            self._batch_dialog.refresh_tasks(self._batch_queue.tasks)
+            self._batch_dialog.set_running_state(self._batch_running)
+
+    def _import_batch_files(self, file_paths, mode: str, params: dict, multiplier: int):
+        if not file_paths:
+            return
+        added = self._batch_queue.add_tasks(file_paths, mode, params, multiplier)
+        self._refresh_batch_views()
+        self.param_panel.append_log(
+            f"📚 批处理导入: 新增 {len(added)} 条，当前总计 {len(self._batch_queue.tasks)} 条"
+        )
+
+    def _on_open_batch_manager(self):
+        if self._batch_dialog is None:
+            self._batch_dialog = BatchQueueDialog(self)
+            self._batch_dialog.import_tasks.connect(self._on_batch_dialog_import_tasks)
+            self._batch_dialog.start_queue.connect(self._on_start_batch_queue)
+            self._batch_dialog.clear_queue.connect(self._on_clear_batch_queue)
+            self._batch_dialog.remove_task.connect(self._on_remove_batch_task)
+            self._batch_dialog.retry_task.connect(self._on_retry_batch_task)
+            self._batch_dialog.compare_task.connect(self._on_compare_batch_task)
+            self._batch_dialog.save_task_config.connect(self._on_batch_dialog_save_task_config)
+
+            def _on_dialog_closed(_obj=None):
+                self._batch_dialog = None
+
+            self._batch_dialog.destroyed.connect(_on_dialog_closed)
+
+        self._refresh_batch_views()
+        self._batch_dialog.show()
+        self._batch_dialog.raise_()
+        self._batch_dialog.activateWindow()
+
+    def _on_batch_dialog_import_tasks(self, file_paths, mode: str, params: dict, multiplier: int):
+        self._import_batch_files(file_paths, mode, params, multiplier)
+
+    def _on_batch_dialog_save_task_config(self, task_id: int, mode: str, params: dict, multiplier: int):
+        ok = self._batch_queue.update_task_config(
+            task_id,
+            mode=mode,
+            params=params,
+            multiplier=multiplier,
+        )
+        if not ok:
+            QMessageBox.information(self, "提示", "仅可修改等待中/失败/已取消的任务")
+            return
+        self._refresh_batch_views()
+        self.param_panel.append_log(f"🛠 已更新任务 #{task_id} 的独立参数")
+
+    def _on_import_batch_videos(self):
+        """批量导入视频到队列"""
+        ext_filter = "视频文件 (" + " ".join(
+            f"*{ext}" for ext in SUPPORTED_VIDEO_FORMATS
+        ) + ")"
+        file_paths, _ = QFileDialog.getOpenFileNames(
+            self, "批量选择视频文件", "", ext_filter
+        )
+        if not file_paths:
+            return
+
+        mode = self.param_panel.get_batch_mode()
+        params = self.param_panel.get_parameters()
+        multiplier = self.param_panel.get_interp_multiplier()
+        self._import_batch_files(file_paths, mode, params, multiplier)
+
+    def _on_clear_batch_queue(self):
+        """清空批处理队列"""
+        if self._batch_running:
+            QMessageBox.information(self, "提示", "队列运行中，无法清空")
+            return
+        self._batch_queue.clear()
+        self._refresh_batch_views()
+        self.param_panel.append_log("🧹 已清空批处理队列")
+
+    def _on_remove_batch_task(self, task_id: int):
+        """移除队列任务"""
+        if self._batch_running and task_id == self._active_batch_task_id:
+            QMessageBox.information(self, "提示", "当前运行中的任务无法移除")
+            return
+        if self._batch_queue.remove_task(task_id):
+            self._refresh_batch_views()
+            self.param_panel.append_log(f"➖ 已移除任务 #{task_id}")
+
+    def _on_retry_batch_task(self, task_id: int):
+        """重试失败任务"""
+        if self._batch_queue.retry_failed(task_id):
+            self._refresh_batch_views()
+            self.param_panel.append_log(f"🔁 任务 #{task_id} 已重置为等待中")
+
+    def _on_compare_batch_task(self, task_id: int):
+        """对比播放指定批处理任务"""
+        task = self._batch_queue.get_task(task_id)
+        if not task or task.status != "done" or not task.output_path:
+            QMessageBox.information(self, "提示", "请先选择已完成的任务")
+            return
+        if not os.path.exists(task.input_path) or not os.path.exists(task.output_path):
+            QMessageBox.warning(self, "文件不存在", "原始或输出文件不存在")
+            return
+        dlg = VideoCompareDialog(task.input_path, task.output_path, parent=self)
+        dlg.exec_()
+
+    def _on_start_batch_queue(self):
+        """启动批处理队列（串行）"""
+        if self._batch_running:
+            return
+        if not self._batch_queue.has_pending():
+            QMessageBox.information(self, "提示", "队列中没有等待中的任务")
+            return
+
+        self._batch_running = True
+        self.param_panel.set_batch_running_state(True)
+        if self._batch_dialog is not None:
+            self._batch_dialog.set_running_state(True)
+        self.param_panel.append_log("🚚 批处理队列启动")
+        self._start_next_batch_task()
+
+    def _apply_task_snapshot_to_ui(self, task: BatchTask):
+        """应用任务参数快照到UI（保证批处理参数稳定）"""
+        params = task.params
+
+        idx_model = self.param_panel.combo_model.findData(params.get("model_key", "RealESRGAN_x4"))
+        if idx_model >= 0:
+            self.param_panel.combo_model.setCurrentIndex(idx_model)
+
+        self.param_panel.spin_scale.setValue(int(params.get("scale", 4)))
+        self.param_panel.spin_denoise.setValue(float(params.get("denoise", 0.0)))
+        self.param_panel.chk_tiling.setChecked(bool(params.get("use_tiling", True)))
+        self.param_panel.spin_tile_size.setValue(int(params.get("tile_size", 512)))
+        self.param_panel.spin_tile_pad.setValue(int(params.get("tile_pad", 32)))
+        self.param_panel.chk_half.setChecked(bool(params.get("half", True)))
+
+        idx_multi = self.param_panel.combo_interp_multi.findData(task.multiplier)
+        if idx_multi >= 0:
+            self.param_panel.combo_interp_multi.setCurrentIndex(idx_multi)
+
+    def _start_next_batch_task(self):
+        """启动下一条等待中的批处理任务"""
+        if not self._batch_running:
+            return
+
+        task = self._batch_queue.next_pending_task()
+        if task is None:
+            self._batch_running = False
+            self._active_batch_task_id = None
+            self.param_panel.set_batch_running_state(False)
+            self.param_panel.set_processing_state(False)
+            if self._batch_dialog is not None:
+                self._batch_dialog.set_running_state(False)
+            self._refresh_batch_views()
+            s = self._batch_queue.stats()
+            self.param_panel.append_log(
+                f"✅ 批处理完成: 总计{s['total']} | 成功{s['done']} | 失败{s['failed']} | 取消{s['cancelled']}"
+            )
+            self.statusBar().showMessage("批处理队列已完成")
+            return
+
+        self._active_batch_task_id = task.task_id
+        self._batch_queue.mark_running(task.task_id)
+        self.param_panel.update_batch_item(task.task_id, status="处理中", progress="0%")
+        if self._batch_dialog is not None:
+            self._batch_dialog.update_task_item(task)
+        self.param_panel.append_log(
+            f"➡️ 执行任务 #{task.task_id}: {os.path.basename(task.input_path)} [{self._mode_display(task.mode)}]"
+        )
+
+        # 更新当前输入视频（用于预览与信息显示）
+        self._load_video(task.input_path)
+        self._apply_task_snapshot_to_ui(task)
+
+        if task.mode == "sr":
+            self._start_batch_sr(task)
+        elif task.mode == "interp":
+            self._start_batch_interp(task)
+        else:
+            self._start_batch_combined(task)
+
+    def _start_batch_sr(self, task: BatchTask):
+        params = task.params
+        if not self._load_enhancer():
+            self._batch_queue.mark_failed(task.task_id, "模型加载失败")
+            self.param_panel.update_batch_item(task.task_id, status="失败", progress="--")
+            failed_task = self._batch_queue.get_task(task.task_id)
+            if self._batch_dialog is not None and failed_task is not None:
+                self._batch_dialog.update_task_item(failed_task)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
+            return
+
+        self.param_panel.set_processing_state(True)
+        self.param_panel.progress_bar.setValue(0)
+
+        self._worker_thread = VideoWorkerThread(self)
+        self._worker_thread.setup(
+            enhancer=self._enhancer,
+            input_path=task.input_path,
+            use_tiling=params["use_tiling"],
+            tile_size=params["tile_size"],
+            tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
+        )
+        self._worker_thread.progress_signal.connect(self._on_processing_progress)
+        self._worker_thread.preview_signal.connect(self._on_processing_preview)
+        self._worker_thread.finished_signal.connect(self._on_processing_finished)
+        self._worker_thread.error_signal.connect(self._on_processing_error)
+        self._worker_thread.status_signal.connect(self._on_processing_status)
+        self._worker_thread.start()
+
+    def _start_batch_interp(self, task: BatchTask):
+        if not self._load_rife():
+            self._batch_queue.mark_failed(task.task_id, "RIFE 模型加载失败")
+            self.param_panel.update_batch_item(task.task_id, status="失败", progress="--")
+            failed_task = self._batch_queue.get_task(task.task_id)
+            if self._batch_dialog is not None and failed_task is not None:
+                self._batch_dialog.update_task_item(failed_task)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
+            return
+
+        self.param_panel.set_processing_state(True)
+        self.param_panel.progress_bar.setValue(0)
+
+        self._interp_thread = InterpolationWorkerThread(self)
+        self._interp_thread.setup(
+            rife=self._rife,
+            input_path=task.input_path,
+            multiplier=task.multiplier,
+        )
+        self._interp_thread.progress_signal.connect(self._on_processing_progress)
+        self._interp_thread.preview_signal.connect(self._on_processing_preview)
+        self._interp_thread.finished_signal.connect(self._on_processing_finished)
+        self._interp_thread.error_signal.connect(self._on_processing_error)
+        self._interp_thread.status_signal.connect(self._on_processing_status)
+        self._interp_thread.start()
+
+    def _start_batch_combined(self, task: BatchTask):
+        params = task.params
+        if not self._load_enhancer() or not self._load_rife():
+            self._batch_queue.mark_failed(task.task_id, "模型加载失败")
+            self.param_panel.update_batch_item(task.task_id, status="失败", progress="--")
+            failed_task = self._batch_queue.get_task(task.task_id)
+            if self._batch_dialog is not None and failed_task is not None:
+                self._batch_dialog.update_task_item(failed_task)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
+            return
+
+        self._combined_mode = True
+        self._combined_sr_output = ""
+        self.param_panel.set_processing_state(True)
+        self.param_panel.progress_bar.setValue(0)
+
+        self._worker_thread = VideoWorkerThread(self)
+        self._worker_thread.setup(
+            enhancer=self._enhancer,
+            input_path=task.input_path,
+            use_tiling=params["use_tiling"],
+            tile_size=params["tile_size"],
+            tile_pad=params["tile_pad"],
+            denoise_strength=params["denoise"],
+            outscale=params["scale"],
+        )
+        self._worker_thread.progress_signal.connect(self._on_processing_progress)
+        self._worker_thread.preview_signal.connect(self._on_processing_preview)
+        self._worker_thread.finished_signal.connect(self._on_processing_finished)
+        self._worker_thread.error_signal.connect(self._on_processing_error)
+        self._worker_thread.status_signal.connect(self._on_processing_status)
+        self._worker_thread.start()
 
     def _load_video(self, file_path: str):
         """加载视频文件并更新UI"""
@@ -462,6 +790,9 @@ class MainWindow(QMainWindow):
 
     def _on_start_processing(self):
         """开始视频处理"""
+        if self._batch_running:
+            QMessageBox.information(self, "提示", "批处理队列运行中，请先停止队列")
+            return
         if not self._input_path:
             QMessageBox.information(self, "提示", "请先导入视频")
             return
@@ -500,6 +831,11 @@ class MainWindow(QMainWindow):
 
     def _on_cancel_processing(self):
         """取消处理"""
+        if self._batch_running:
+            self._batch_running = False
+            self.param_panel.set_batch_running_state(False)
+            if self._batch_dialog is not None:
+                self._batch_dialog.set_running_state(False)
         self._combined_mode = False
         if self._worker_thread and self._worker_thread.isRunning():
             self._worker_thread.cancel()
@@ -511,6 +847,18 @@ class MainWindow(QMainWindow):
     def _on_processing_progress(self, current: int, total: int, fps: float):
         """处理进度更新"""
         self.param_panel.update_progress(current, total, fps)
+        if self._batch_running and self._active_batch_task_id:
+            self._batch_queue.update_progress(self._active_batch_task_id, current, total)
+            percent = int(current * 100 / total) if total > 0 else 0
+            self.param_panel.update_batch_item(
+                self._active_batch_task_id,
+                status="处理中",
+                progress=f"{percent}%"
+            )
+            if self._batch_dialog is not None:
+                task = self._batch_queue.get_task(self._active_batch_task_id)
+                if task is not None:
+                    self._batch_dialog.update_task_item(task)
 
     def _on_processing_preview(self, rgb_frame: np.ndarray):
         """处理中的预览帧"""
@@ -527,6 +875,21 @@ class MainWindow(QMainWindow):
             self.param_panel.append_log("⏩ 联合模式：自动开始补帧...")
             self.param_panel.progress_bar.setValue(0)
             self._start_interpolation_on(output_path)
+            return
+
+        # 批处理模式：当前任务完成后自动处理下一条
+        if self._batch_running and self._active_batch_task_id:
+            tid = self._active_batch_task_id
+            self._batch_queue.mark_done(tid, output_path)
+            self.param_panel.update_batch_item(tid, status="已完成", progress="100%")
+            if self._batch_dialog is not None:
+                task = self._batch_queue.get_task(tid)
+                if task is not None:
+                    self._batch_dialog.update_task_item(task)
+            self.param_panel.append_log(f"✅ 任务 #{tid} 完成: {output_path}")
+            self.param_panel.set_processing_state(False)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
             return
 
         self.param_panel.set_processing_state(False)
@@ -546,6 +909,21 @@ class MainWindow(QMainWindow):
 
     def _on_processing_error(self, error_msg: str):
         """处理出错"""
+        if self._batch_running and self._active_batch_task_id:
+            tid = self._active_batch_task_id
+            self._batch_queue.mark_failed(tid, error_msg)
+            self.param_panel.update_batch_item(tid, status="失败", progress="--")
+            if self._batch_dialog is not None:
+                task = self._batch_queue.get_task(tid)
+                if task is not None:
+                    self._batch_dialog.update_task_item(task)
+            self.param_panel.append_log(f"❌ 任务 #{tid} 失败: {error_msg.splitlines()[0]}")
+            self._combined_mode = False
+            self.param_panel.set_processing_state(False)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
+            return
+
         self._combined_mode = False
         self.param_panel.set_processing_state(False)
         self.param_panel.append_log(f"✗ 错误: {error_msg}")
@@ -584,6 +962,9 @@ class MainWindow(QMainWindow):
 
     def _on_start_combined(self):
         """开始联合处理（先超分 → 再补帧）"""
+        if self._batch_running:
+            QMessageBox.information(self, "提示", "批处理队列运行中，请先停止队列")
+            return
         if not self._input_path:
             QMessageBox.information(self, "提示", "请先导入视频")
             return
@@ -653,6 +1034,22 @@ class MainWindow(QMainWindow):
 
     def _on_combined_interp_finished(self, output_path: str):
         """联合模式补帧完成"""
+        if self._batch_running and self._active_batch_task_id:
+            tid = self._active_batch_task_id
+            self._combined_mode = False
+            self._output_path = output_path
+            self._batch_queue.mark_done(tid, output_path)
+            self.param_panel.update_batch_item(tid, status="已完成", progress="100%")
+            if self._batch_dialog is not None:
+                task = self._batch_queue.get_task(tid)
+                if task is not None:
+                    self._batch_dialog.update_task_item(task)
+            self.param_panel.append_log(f"✅ 任务 #{tid} 完成: {output_path}")
+            self.param_panel.set_processing_state(False)
+            self._active_batch_task_id = None
+            self._start_next_batch_task()
+            return
+
         self._combined_mode = False
         self._output_path = output_path
         self.param_panel.set_processing_state(False)
@@ -713,6 +1110,9 @@ class MainWindow(QMainWindow):
 
     def _on_start_interpolation(self):
         """开始视频补帧"""
+        if self._batch_running:
+            QMessageBox.information(self, "提示", "批处理队列运行中，请先停止队列")
+            return
         if not self._input_path:
             QMessageBox.information(self, "提示", "请先导入视频")
             return

@@ -6,7 +6,8 @@ from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox,
     QGroupBox, QPushButton, QProgressBar, QTextEdit,
-    QSlider, QScrollArea
+    QSlider, QScrollArea, QTableWidget, QTableWidgetItem,
+    QHeaderView, QAbstractItemView
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
@@ -24,6 +25,13 @@ class ParameterPanel(QWidget):
     cancel_processing = pyqtSignal()
     start_interpolation = pyqtSignal()     # 开始补帧
     start_combined = pyqtSignal()          # 超分 + 补帧联合处理
+    import_batch_videos = pyqtSignal()     # 批量导入视频
+    open_batch_manager = pyqtSignal()      # 打开完整队列管理界面
+    start_batch_queue = pyqtSignal()       # 启动批处理队列
+    clear_batch_queue = pyqtSignal()       # 清空批处理队列
+    remove_batch_task = pyqtSignal(int)    # 移除指定任务
+    retry_batch_task = pyqtSignal(int)     # 重试失败任务
+    compare_batch_task = pyqtSignal(int)   # 对比指定任务
     preview_requested = pyqtSignal()
     preview_toggled = pyqtSignal(bool)     # 实时预览开关状态变化
     compare_requested = pyqtSignal()       # 视频对比播放
@@ -232,6 +240,109 @@ class ParameterPanel(QWidget):
         interp_group.setLayout(interp_layout)
         layout.addWidget(interp_group)
 
+        # ========== 批处理队列 ==========
+        batch_group = QGroupBox("批处理队列")
+        batch_group.setStyleSheet(self._group_style())
+        batch_layout = QVBoxLayout()
+        batch_layout.setSpacing(8)
+
+        # 队列模式
+        mode_layout = QHBoxLayout()
+        mode_layout.addWidget(QLabel("队列模式:"))
+        self.combo_batch_mode = QComboBox()
+        self.combo_batch_mode.addItem("超分", "sr")
+        self.combo_batch_mode.addItem("补帧", "interp")
+        self.combo_batch_mode.addItem("超分 + 补帧", "combined")
+        self.combo_batch_mode.setStyleSheet(self._combo_style())
+        mode_layout.addWidget(self.combo_batch_mode)
+        batch_layout.addLayout(mode_layout)
+
+        # 批处理主按钮
+        batch_btn_row = QHBoxLayout()
+        self.btn_import_batch = QPushButton("📚 批量导入")
+        self.btn_import_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_import_batch.clicked.connect(self.import_batch_videos.emit)
+        batch_btn_row.addWidget(self.btn_import_batch)
+
+        self.btn_start_batch = QPushButton("▶ 开始队列")
+        self.btn_start_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_start_batch.clicked.connect(self.start_batch_queue.emit)
+        batch_btn_row.addWidget(self.btn_start_batch)
+
+        self.btn_clear_batch = QPushButton("🧹 清空")
+        self.btn_clear_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_clear_batch.clicked.connect(self.clear_batch_queue.emit)
+        batch_btn_row.addWidget(self.btn_clear_batch)
+        batch_layout.addLayout(batch_btn_row)
+
+        self.btn_open_batch_manager = QPushButton("🗂 打开队列管理器")
+        self.btn_open_batch_manager.setStyleSheet(self._btn_secondary_style())
+        self.btn_open_batch_manager.clicked.connect(self.open_batch_manager.emit)
+        batch_layout.addWidget(self.btn_open_batch_manager)
+
+        # 队列表格
+        self.table_batch = QTableWidget(0, 5)
+        self.table_batch.setHorizontalHeaderLabels(["ID", "文件", "模式", "状态", "进度"])
+        self.table_batch.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_batch.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table_batch.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_batch.verticalHeader().setVisible(False)
+        self.table_batch.setAlternatingRowColors(True)
+        self.table_batch.setMaximumHeight(180)
+        self.table_batch.setStyleSheet("""
+            QTableWidget {
+                background-color: #1f1f1f;
+                color: #ddd;
+                border: 1px solid #444;
+                gridline-color: #444;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #333;
+                color: #ddd;
+                border: 1px solid #444;
+                padding: 3px;
+                font-size: 11px;
+            }
+            QTableWidget::item:selected {
+                background-color: #0078d4;
+                color: white;
+            }
+        """)
+        header = self.table_batch.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self.table_batch.setColumnHidden(0, True)  # 隐藏内部ID
+        batch_layout.addWidget(self.table_batch)
+
+        # 队列条目操作
+        batch_item_row = QHBoxLayout()
+        self.btn_remove_batch = QPushButton("➖ 移除")
+        self.btn_remove_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_remove_batch.clicked.connect(self._emit_remove_batch_task)
+        batch_item_row.addWidget(self.btn_remove_batch)
+
+        self.btn_retry_batch = QPushButton("🔁 重试失败")
+        self.btn_retry_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_retry_batch.clicked.connect(self._emit_retry_batch_task)
+        batch_item_row.addWidget(self.btn_retry_batch)
+
+        self.btn_compare_batch = QPushButton("🎬 对比选中")
+        self.btn_compare_batch.setStyleSheet(self._btn_secondary_style())
+        self.btn_compare_batch.clicked.connect(self._emit_compare_batch_task)
+        batch_item_row.addWidget(self.btn_compare_batch)
+        batch_layout.addLayout(batch_item_row)
+
+        self.lbl_batch_info = QLabel("队列: 0 条")
+        self.lbl_batch_info.setStyleSheet("color: #999; font-size: 11px;")
+        batch_layout.addWidget(self.lbl_batch_info)
+
+        batch_group.setLayout(batch_layout)
+        layout.addWidget(batch_group)
+
         # ========== 操作按钮 ==========
         # 实时预览开关
         preview_row = QHBoxLayout()
@@ -415,6 +526,52 @@ class ParameterPanel(QWidget):
         """获取当前补帧倍率"""
         return self.combo_interp_multi.currentData()
 
+    def get_batch_mode(self) -> str:
+        """获取批处理队列模式"""
+        return self.combo_batch_mode.currentData()
+
+    def add_batch_item(self, task_id: int, file_name: str, mode_text: str):
+        """向批处理表格添加任务"""
+        row = self.table_batch.rowCount()
+        self.table_batch.insertRow(row)
+        self.table_batch.setItem(row, 0, QTableWidgetItem(str(task_id)))
+        self.table_batch.setItem(row, 1, QTableWidgetItem(file_name))
+        self.table_batch.setItem(row, 2, QTableWidgetItem(mode_text))
+        self.table_batch.setItem(row, 3, QTableWidgetItem("等待中"))
+        self.table_batch.setItem(row, 4, QTableWidgetItem("0%"))
+        self._update_batch_info()
+
+    def update_batch_item(self, task_id: int, status: str = None, progress: str = None):
+        """更新批处理任务状态/进度"""
+        row = self._find_batch_row(task_id)
+        if row < 0:
+            return
+        if status is not None:
+            self.table_batch.setItem(row, 3, QTableWidgetItem(status))
+        if progress is not None:
+            self.table_batch.setItem(row, 4, QTableWidgetItem(progress))
+
+    def remove_batch_item(self, task_id: int):
+        """从批处理表格移除任务"""
+        row = self._find_batch_row(task_id)
+        if row >= 0:
+            self.table_batch.removeRow(row)
+            self._update_batch_info()
+
+    def clear_batch_items(self):
+        """清空批处理表格"""
+        self.table_batch.setRowCount(0)
+        self._update_batch_info()
+
+    def set_batch_running_state(self, running: bool):
+        """设置批处理队列运行状态"""
+        self.btn_import_batch.setEnabled(not running)
+        self.btn_start_batch.setEnabled(not running)
+        self.btn_clear_batch.setEnabled(not running)
+        self.btn_open_batch_manager.setEnabled(not running)
+        self.btn_remove_batch.setEnabled(not running)
+        self.btn_retry_batch.setEnabled(not running)
+
     def update_interp_info(self, original_fps: float):
         """根据原始帧率更新补帧信息提示"""
         multi = self.get_interp_multiplier()
@@ -441,6 +598,9 @@ class ParameterPanel(QWidget):
         self.btn_start.setEnabled(not processing)
         self.btn_interpolate.setEnabled(not processing)
         self.btn_combined.setEnabled(not processing)
+        self.btn_start_batch.setEnabled(not processing)
+        self.btn_import_batch.setEnabled(not processing)
+        self.btn_open_batch_manager.setEnabled(not processing)
         self.btn_cancel.setEnabled(processing)
         self.btn_import.setEnabled(not processing)
         self.btn_preview.setEnabled(not processing)
@@ -501,6 +661,44 @@ class ParameterPanel(QWidget):
         # 自动滚动到底部
         scrollbar = self.log_text.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
+
+    def _selected_batch_task_id(self) -> int:
+        rows = self.table_batch.selectionModel().selectedRows()
+        if not rows:
+            return -1
+        row = rows[0].row()
+        item = self.table_batch.item(row, 0)
+        if not item:
+            return -1
+        try:
+            return int(item.text())
+        except Exception:
+            return -1
+
+    def _find_batch_row(self, task_id: int) -> int:
+        for row in range(self.table_batch.rowCount()):
+            item = self.table_batch.item(row, 0)
+            if item and item.text() == str(task_id):
+                return row
+        return -1
+
+    def _update_batch_info(self):
+        self.lbl_batch_info.setText(f"队列: {self.table_batch.rowCount()} 条")
+
+    def _emit_remove_batch_task(self):
+        tid = self._selected_batch_task_id()
+        if tid > 0:
+            self.remove_batch_task.emit(tid)
+
+    def _emit_retry_batch_task(self):
+        tid = self._selected_batch_task_id()
+        if tid > 0:
+            self.retry_batch_task.emit(tid)
+
+    def _emit_compare_batch_task(self):
+        tid = self._selected_batch_task_id()
+        if tid > 0:
+            self.compare_batch_task.emit(tid)
 
     # ========== 样式 ==========
 
