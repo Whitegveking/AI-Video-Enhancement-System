@@ -410,7 +410,17 @@ class MainWindow(QMainWindow):
         )
 
         # 更新当前输入视频（用于预览与信息显示）
-        self._load_video(task.input_path)
+        success = self._load_video(task.input_path, show_error=False)
+        if not success:
+            self._batch_queue.mark_failed(task.task_id, "视频读取失败")
+            self.param_panel.update_batch_item(task.task_id, status="失败", progress="--")
+            failed_task = self._batch_queue.get_task(task.task_id)
+            if self._batch_dialog is not None and failed_task is not None:
+                self._batch_dialog.update_task_item(failed_task)
+            self._active_batch_task_id = None
+            QTimer.singleShot(0, self._start_next_batch_task)
+            return
+
         self._apply_task_snapshot_to_ui(task)
 
         if task.mode == "sr":
@@ -513,7 +523,7 @@ class MainWindow(QMainWindow):
         self._worker_thread.status_signal.connect(self._on_processing_status)
         self._worker_thread.start()
 
-    def _load_video(self, file_path: str):
+    def _load_video(self, file_path: str, show_error: bool = True) -> bool:
         """加载视频文件并更新UI"""
         try:
             self._input_path = file_path
@@ -545,9 +555,15 @@ class MainWindow(QMainWindow):
                 f"  分辨率: {info['width']}×{info['height']}, "
                 f"帧率: {info['fps']:.2f}, 帧数: {info['total_frames']}"
             )
+            return True
 
         except Exception as e:
-            QMessageBox.critical(self, "导入失败", f"无法读取视频文件:\n{str(e)}")
+            if show_error:
+                QMessageBox.critical(self, "导入失败", f"无法读取视频文件:\n{str(e)}")
+            else:
+                self.statusBar().showMessage(f"视频加载失败: {os.path.basename(file_path)}")
+                self.param_panel.append_log(f"❌ 视频加载失败: {os.path.basename(file_path)} ({str(e)})")
+            return False
 
     def _on_frame_slider_changed(self, frame_index: int):
         """帧滑块变化时更新预览"""
